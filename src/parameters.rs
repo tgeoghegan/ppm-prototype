@@ -4,7 +4,7 @@
 //! and related types.
 
 use serde::{Deserialize, Serialize};
-use std::{io::Read, time::Duration};
+use std::io::Read;
 use url::Url;
 
 #[derive(Debug, thiserror::Error)]
@@ -14,7 +14,7 @@ pub enum Error {
 }
 
 /// The configuration parameters for a PPM task, corresponding to
-/// `struct PPMParam` in §3.1.1 of RFCXXXX.
+/// `struct Param` in §4.1 of RFCXXXX.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Parameters {
     pub nonce: [u8; 16],
@@ -22,13 +22,15 @@ pub struct Parameters {
     pub helper_url: Url,
     pub collector_config: HpkeConfig,
     pub batch_size: u64,
-    pub batch_window: Duration,
+    // TODO: use something like std::time::Duration or chrono::Duration _but_
+    // with serde support
+    pub batch_window: u64,
     pub protocol: Protocol,
     // TBD Prio or Hits specific fields
 }
 
 impl Parameters {
-    /// Read in a JSON encoded PPMParam from the provided `std::io::Read` and
+    /// Read in a JSON encoded Param from the provided `std::io::Read` and
     /// construct an instance of `Parameters`.
     ///
     /// Ideally this would be an implementation of `TryFrom<R: Read>` on
@@ -41,7 +43,7 @@ impl Parameters {
     /// Compute the `TaskId` for this `Parameters` instance.
     pub fn task_id(&self) -> TaskId {
         // ekr points out in prio-documents issue #104 that we might not want to
-        // bother specifying the layout of `struct PPMParam` and I think he is
+        // bother specifying the layout of `struct Param` and I think he is
         // probably right. To spare myself the trouble of figuring out how to
         // consistently hash `Parameters`, I'm cheating by just returning the
         // nonce, zero-padded to 32 bytes.
@@ -51,16 +53,16 @@ impl Parameters {
     }
 }
 
-/// Corresponds to a `PPMTaskID`, defined in §3.1.1 of RFCXXXX. The task ID is
+/// Corresponds to a `TaskID`, defined in §4.1 of RFCXXXX. The task ID is
 /// the SHA-256 over a `struct PPMParam`.
 pub type TaskId = [u8; 32];
 
 /// The PPM protocols supported in this implementation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum Protocol {
-    /// The Prio private aggregation system, per §4 of RFCXXXX
+    /// The Prio private aggregation system
     Prio,
-    /// Heavy Hitters. See §5 of RFCXXXX.
+    /// Heavy Hitters
     HeavyHitters,
 }
 
@@ -100,16 +102,16 @@ mod tests {
         "public_key": [0, 1, 2, 3]
     },
     "batch_size": 100,
-    "batch_window": {"secs": 100000, "nanos": 0},
+    "batch_window": 100000,
     "protocol": "Prio"
 }
 "#;
 
         let params = Parameters::from_json_reader(json_string.as_bytes()).unwrap();
-        assert_eq!(
-            params.nonce,
-            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
-        );
+        let back_to_json = serde_json::to_string(&params).unwrap();
+        let params_again = Parameters::from_json_reader(back_to_json.as_bytes()).unwrap();
+
+        assert_eq!(params, params_again);
     }
 
     #[test]
@@ -126,7 +128,7 @@ mod tests {
                 public_key: vec![0, 1, 2, 3],
             },
             batch_size: 100,
-            batch_window: Duration::from_secs(100),
+            batch_window: 100,
             protocol: Protocol::Prio,
         };
 
@@ -142,7 +144,7 @@ mod tests {
                 public_key: vec![4, 5, 6, 7],
             },
             batch_size: 100,
-            batch_window: Duration::from_secs(100),
+            batch_window: 100,
             protocol: Protocol::Prio,
         };
 
