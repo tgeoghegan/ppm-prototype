@@ -7,8 +7,13 @@ edition = "2018"
 [dependencies]
 chrono = { version = "0.4", features = ["serde", "std"] }
 derivative = "2.1.1"
-hpke = { path = "/home/timg/source/rust-hpke", features = ["std", "x25519", "p256", "serde_impls"] }
+hpke = { path = "/home/timg/source/rust-hpke", features = ["default", "serde_impls", "std"] }
+http = "^0.2"
+rand = "0.8"
 serde = { version = "^1.0", features = ["derive"] }
 serde_json = "1.0"
+serde_repr = "0.1"
 thiserror = "1.0"
+tokio = {version = "^1.9", features = ["full"]}
 url = { version = "2.2.2", features = ["serde"] }
+warp = "^0.3"

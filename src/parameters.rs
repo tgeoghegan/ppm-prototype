@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use std::io::Read;
 use url::Url;
 
+use crate::hpke;
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("JSON parse error: {0}")]
@@ -20,7 +22,7 @@ pub struct Parameters {
     pub nonce: [u8; 16],
     pub leader_url: Url,
     pub helper_url: Url,
-    pub collector_config: HpkeConfig,
+    pub collector_config: hpke::Config,
     pub batch_size: u64,
     // TODO: use something like std::time::Duration or chrono::Duration _but_
     // with serde support
@@ -66,25 +68,11 @@ pub enum Protocol {
     HeavyHitters,
 }
 
-/// HPKE configuration for a PPM participant.
-// TODO: I wish we could do better than u16 for the kem/kedf/aead IDs, and
-// better than Vec<u8> for the PK.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub struct HpkeConfig {
-    id: u8,
-    kem_id: u16,
-    kdf_id: u16,
-    aead_id: u16,
-    public_key: Vec<u8>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hpke::{
-        aead::{Aead, ChaCha20Poly1305},
-        kdf::{HkdfSha384, Kdf},
-        kem::{Kem, X25519HkdfSha256},
+    use crate::hpke::{
+        AuthenticatedEncryptionWithAssociatedData, KeyDerivationFunction, KeyEncapsulationMechanism,
     };
 
     #[test]
@@ -96,9 +84,9 @@ mod tests {
     "helper_url": "https://helper.fake",
     "collector_config": {
         "id": 1,
-        "kem_id": 2,
-        "kdf_id": 3,
-        "aead_id": 4,
+        "kem_id": 16,
+        "kdf_id": 1,
+        "aead_id": 3,
         "public_key": [0, 1, 2, 3]
     },
     "batch_size": 100,
@@ -120,12 +108,13 @@ mod tests {
             nonce: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
             leader_url: Url::parse("https://leader.fake").unwrap(),
             helper_url: Url::parse("https://helper.fake").unwrap(),
-            collector_config: HpkeConfig {
+            collector_config: hpke::Config {
                 id: 0,
-                kem_id: X25519HkdfSha256::KEM_ID,
-                kdf_id: HkdfSha384::KDF_ID,
-                aead_id: ChaCha20Poly1305::AEAD_ID,
+                kem_id: KeyEncapsulationMechanism::X25519HkdfSha256,
+                kdf_id: KeyDerivationFunction::HkdfSha384,
+                aead_id: AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305,
                 public_key: vec![0, 1, 2, 3],
+                private_key: None,
             },
             batch_size: 100,
             batch_window: 100,
@@ -136,12 +125,13 @@ mod tests {
             nonce: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
             leader_url: Url::parse("https://leader.fake").unwrap(),
             helper_url: Url::parse("https://helper.fake").unwrap(),
-            collector_config: HpkeConfig {
+            collector_config: hpke::Config {
                 id: 0,
-                kem_id: X25519HkdfSha256::KEM_ID,
-                kdf_id: HkdfSha384::KDF_ID,
-                aead_id: ChaCha20Poly1305::AEAD_ID,
+                kem_id: KeyEncapsulationMechanism::X25519HkdfSha256,
+                kdf_id: KeyDerivationFunction::HkdfSha384,
+                aead_id: AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305,
                 public_key: vec![4, 5, 6, 7],
+                private_key: None,
             },
             batch_size: 100,
             batch_window: 100,
