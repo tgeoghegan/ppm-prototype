@@ -3,6 +3,7 @@
 //! Provides structures and functionality for dealing with a `struct PPMParam`
 //! and related types.
 
+use rand::{thread_rng, Rng};
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use url::Url;
@@ -32,6 +33,29 @@ pub struct Parameters {
 }
 
 impl Parameters {
+    /// Construct test PPM parameters, until I wire up loading these from
+    /// configuration
+    pub fn fixed_parameters() -> Self {
+        let params_json = r#"
+{
+    "nonce": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    "leader_url": "http://localhost:8080",
+    "helper_url": "http://localhost:8081",
+    "collector_config": {
+        "id": 1,
+        "kem_id": 16,
+        "kdf_id": 1,
+        "aead_id": 3,
+        "public_key": [0, 1, 2, 3]
+    },
+    "batch_size": 100,
+    "batch_window": 100000,
+    "protocol": "Prio"
+}
+"#;
+        Self::from_json_reader(params_json.as_bytes()).unwrap()
+    }
+
     /// Read in a JSON encoded Param from the provided `std::io::Read` and
     /// construct an instance of `Parameters`.
     ///
@@ -58,6 +82,10 @@ impl Parameters {
 /// Corresponds to a `TaskID`, defined in §4.1 of RFCXXXX. The task ID is
 /// the SHA-256 over a `struct PPMParam`.
 pub type TaskId = [u8; 32];
+
+pub fn new_task_id() -> TaskId {
+    thread_rng().gen::<[u8; 32]>()
+}
 
 /// The PPM protocols supported in this implementation.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]

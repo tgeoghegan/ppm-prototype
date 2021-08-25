@@ -10,12 +10,37 @@ use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
+use crate::{parameters::TaskId, upload::Report};
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     /// Wrapper around errors from crate hpke. See `hpke::HpkeError` for more
     /// details on possible variants.
     #[error("HPKE error")]
     Hpke(#[from] HpkeError),
+    #[error("Serde error")]
+    Serde(#[from] serde_json::error::Error),
+    #[error("invalid HPKE configuration: {0}")]
+    InvalidConfiguration(&'static str),
+}
+
+#[derive(Copy, Clone, Debug, Serialize_repr, Deserialize_repr, Eq, PartialEq)]
+#[repr(u8)]
+pub enum Role {
+    Leader = 0x01,
+    Helper = 0x00,
+}
+
+impl Role {
+    /// Returns the index into protocol message vectors at which this role's
+    /// entry can be found. e.g., the leader's input share in a `Report` is
+    /// `Report.encrypted_input_shares[Role::Leader.role_index()]`.
+    fn index(self) -> usize {
+        match self {
+            Role::Leader => 0,
+            Role::Helper => 1,
+        }
+    }
 }
 
 /// HPKE configuration for a PPM participant, corresponding to `struct
@@ -25,7 +50,7 @@ pub enum Error {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Config {
     /// Identifier of the HPKE configuration
-    pub(crate) id: u8,
+    pub id: u8,
     pub(crate) kem_id: KeyEncapsulationMechanism,
     pub(crate) kdf_id: KeyDerivationFunction,
     pub(crate) aead_id: AuthenticatedEncryptionWithAssociatedData,
@@ -35,10 +60,13 @@ pub struct Config {
     /// The private key, serialized using the `SerializePrivateKey` function as
     /// described in draft-irtf-cfrg-hpke-11, §4 and §7.1.2. This value will not
     /// be present when advertised by a server from hpke_config.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) private_key: Option<Vec<u8>>,
 }
 
 impl Config {
+    /// Generate a new keypair for the requested algorithm and construct a
+    /// Config for it
     pub fn new_recipient(
         kem: KeyEncapsulationMechanism,
         kdf: KeyDerivationFunction,
@@ -75,6 +103,82 @@ impl Config {
             public_key: serialized_public_key,
             private_key: Some(serialized_private_key),
         }
+    }
+
+    /// Create a copy of the config without the private key, suitable for
+    /// public advertising of HPKE config
+    pub fn without_private_key(&self) -> Self {
+        let mut copy = self.clone();
+        copy.private_key = None;
+        copy
+    }
+
+    /// True if this HPKE config's algos are supported by this implementation.
+    // TODO(timg) figure out a more graceful way to dispatch to different
+    // specializations of Sender or Receiver
+    fn supported_configuration(&self) -> Result<(), Error> {
+        if self.kem_id == KeyEncapsulationMechanism::X25519HkdfSha256
+            && self.kdf_id == KeyDerivationFunction::HkdfSha256
+            && self.aead_id == AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305
+        {
+            Ok(())
+        } else {
+            Err(Error::InvalidConfiguration("unsupported HPKE algorithms"))
+        }
+    }
+
+    /// Construct an application into string suitable for constructing HPKE
+    /// contexts for sealing or opening PPM reports.
+    fn report_application_info(task_id: &TaskId, recipient_role: Role) -> Vec<u8> {
+        // application info is `"pda input share" || task_id || server_role` per
+        // §4.2.2 Upload Request and §4.3.1 Aggregate Request
+        [
+            "pda input share".as_bytes(),
+            task_id,
+            &[recipient_role as u8],
+        ]
+        .concat()
+    }
+
+    /// Construct an HPKE Sender suitable for encrypting `EncryptedInputShare`
+    /// structures for inclusion in a PPM `Report`.
+    pub fn report_sender(
+        &self,
+        task_id: &TaskId,
+        recipient_role: Role,
+    ) -> Result<Sender<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>, Error> {
+        // TODO(timg) deal with algo IDs besides these ones -- but what would
+        // this function even return then?
+        self.supported_configuration()?;
+
+        Sender::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
+            &Self::report_application_info(task_id, recipient_role),
+            &self.public_key,
+        )
+    }
+
+    /// Construct an HPKE Recipient suitable for decrypting
+    /// `EncryptedInputShare` structures from a PPM `Report`.
+    pub fn report_recipient(
+        &self,
+        task_id: &TaskId,
+        recipient_role: Role,
+        report: &Report,
+    ) -> Result<Recipient<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>, Error> {
+        // TODO(timg): as in sender(), figure out how to handle other specializations
+        self.supported_configuration()?;
+
+        let private_key = self
+            .private_key
+            .as_ref()
+            .ok_or(Error::InvalidConfiguration("no private key"))?;
+
+        Recipient::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
+            recipient_role,
+            &Self::report_application_info(task_id, recipient_role),
+            private_key,
+            &report.encrypted_input_shares[recipient_role.index()].encapsulated_context,
+        )
     }
 }
 
@@ -151,7 +255,19 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
         })
     }
 
-    pub fn seal(
+    /// Encrypt the plaintext, incorporating AAD derived from `report`, and
+    /// return the ciphertext, which consists of (ciphertext || tag), and is
+    /// suitable as the value of `EncryptedInputShare.payload`.
+    pub fn encrypt_input_share(
+        &mut self,
+        report: &Report,
+        plaintext: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let (ciphertext, tag) = self.seal(plaintext, &report.associated_data())?;
+        Ok([&ciphertext, tag.to_bytes().as_slice()].concat())
+    }
+
+    fn seal(
         &mut self,
         plaintext: &[u8],
         associated_data: &[u8],
@@ -171,10 +287,12 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
 /// encapsulation algorithms.
 pub struct Recipient<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> {
     context: AeadCtxR<Encrypt, Derive, Encapsulate>,
+    role: Role,
 }
 
 impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, Encapsulate> {
     pub fn new(
+        role: Role,
         application_info: &[u8],
         serialized_recipient_private_key: &[u8],
         serialized_sender_encapsulated_key: &[u8],
@@ -197,10 +315,23 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
             application_info,
         )?;
 
-        Ok(Self { context })
+        Ok(Self { context, role })
     }
 
-    pub fn open(
+    /// Decrypt the input share from `report` for this `Recipient`'s server role
+    /// and return the plaintext.
+    pub fn decrypt_input_share(&mut self, report: &Report) -> Result<Vec<u8>, Error> {
+        let tag_len = AeadTag::<Encrypt>::size();
+        let payload = &report.encrypted_input_shares[self.role.index()].payload;
+
+        // This assumes that `EncryptedInputShare.payload` consists of
+        // (ciphertext || tag). That's true for all AEADs currently supported by
+        // HPKE but may not always be true.
+        let (ciphertext, tag) = payload.split_at(payload.len() - tag_len);
+        self.open(ciphertext, &report.associated_data(), tag)
+    }
+
+    fn open(
         &mut self,
         ciphertext: &[u8],
         associated_data: &[u8],
@@ -221,7 +352,7 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
 }
 
 #[cfg(test)]
-mod hpke {
+mod tests {
     use super::*;
 
     #[test]
@@ -276,6 +407,7 @@ mod hpke {
                 KeyDerivationFunction::HkdfSha256,
                 AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305,
             ) => Recipient::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
+                Role::Leader,
                 application_info,
                 &config.private_key.unwrap(),
                 &sender.encapped_key.to_bytes(),

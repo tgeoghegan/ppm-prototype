@@ -1,6 +1,5 @@
 //! The upload portion of the PPM protocol, per §3.3 of RFCXXXX
 
-use chrono::naive::NaiveDateTime;
 use derivative::Derivative;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -9,19 +8,24 @@ use crate::parameters::TaskId;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("JSON parse error: {0}")]
+    #[error("JSON parse error")]
     JsonParse(#[from] serde_json::error::Error),
+    #[error("encryption error")]
+    Encryption(#[from] crate::hpke::Error),
 }
+
+/// Seconds elapsed since start of UNIX epoch
+pub type Time = u64;
 
 /// A report submitted by a client to a leader, corresponding to `struct
 /// Report` in §4.2.2 of RFCXXXX.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Report {
-    task_id: TaskId,
-    time: NaiveDateTime,
-    nonce: u64,
-    extensions: Vec<ReportExtension>,
-    encrypted_input_shares: Vec<EncryptedInputShare>,
+    pub task_id: TaskId,
+    pub time: Time,
+    pub nonce: u64,
+    pub extensions: Vec<ReportExtension>,
+    pub encrypted_input_shares: Vec<EncryptedInputShare>,
 }
 
 impl Report {
@@ -29,6 +33,18 @@ impl Report {
     /// construct an instance of `Report`.
     pub fn from_json_reader<R: Read>(reader: R) -> Result<Self, Error> {
         Ok(serde_json::from_reader(reader)?)
+    }
+
+    /// Construct associated data string suitable for HPKE encryption or
+    /// decryption of an EncryptedInputShare
+    pub(crate) fn associated_data(&self) -> Vec<u8> {
+        // Associated data is time || nonce || extensions, input_share per
+        // §4.2.2. In TLS presentation language, multi-byte values are
+        // represented in network or big endian order. At the moment we use JSON
+        // on the wire, but abide by TLS rules here.
+        // https://datatracker.ietf.org/doc/html/rfc8446#section-3.1
+        // TODO(timg) include upload extensions in AAD
+        [self.time.to_be_bytes(), self.nonce.to_be_bytes()].concat()
     }
 }
 
@@ -53,11 +69,11 @@ pub enum ReportExtensionType {
 #[derive(Clone, Derivative, PartialEq, Eq, Deserialize, Serialize)]
 #[derivative(Debug)]
 pub struct EncryptedInputShare {
-    config_id: u8,
+    pub config_id: u8,
     #[serde(rename = "enc")]
-    #[derivative(Debug = "ignore")]
-    encapsulated_context: Vec<u8>,
-    payload: Vec<u8>,
+    pub encapsulated_context: Vec<u8>,
+    /// This is understood to be ciphertext || tag
+    pub payload: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -69,7 +85,7 @@ mod tests {
         let json_string = r#"
 {
     "task_id": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-    "time": "2012-04-23T18:25:43",
+    "time": "1001",
     "nonce": 100,
     "extensions": [
         {

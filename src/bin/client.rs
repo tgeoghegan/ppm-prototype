@@ -1,3 +1,78 @@
-fn main() {
-    println!("Hello, client");
+use ::hpke::Serializable;
+use ppm_prototype::{
+    hpke::{self, Role},
+    parameters::Parameters,
+    upload::{EncryptedInputShare, Report},
+};
+
+use reqwest::Client;
+
+static CLIENT_USER_AGENT: &str = concat!(
+    env!("CARGO_PKG_NAME"),
+    "/",
+    env!("CARGO_PKG_VERSION"),
+    "/",
+    "client"
+);
+
+#[derive(Debug, thiserror::Error)]
+enum Error {
+    #[error("reqwest error")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("URL error")]
+    Serde(#[from] url::ParseError),
+    #[error("crypto error")]
+    Crypto(#[from] ppm_prototype::hpke::Error),
+    #[error("upload error")]
+    Upload(#[from] ppm_prototype::upload::Error),
+}
+
+#[tokio::main]
+async fn main() -> Result<(), Error> {
+    let http_client = Client::builder().user_agent(CLIENT_USER_AGENT).build()?;
+
+    let ppm_parameters = Parameters::fixed_parameters();
+
+    let hpke_config_endpoint = ppm_parameters.leader_url.join("hpke_config")?;
+
+    let leader_hpke_config: hpke::Config = http_client
+        .get(hpke_config_endpoint)
+        .send()
+        .await?
+        .json()
+        .await?;
+
+    let mut hpke_sender =
+        leader_hpke_config.report_sender(&ppm_parameters.task_id(), Role::Leader)?;
+
+    // TODO(timg): I don't like partially constructing the Report and then
+    // filling in `encrypted_input_shares` later. Maybe impl Default on Report.
+    let mut report = Report {
+        task_id: ppm_parameters.task_id(),
+        time: 1001,
+        nonce: rand::random(),
+        extensions: vec![],
+        encrypted_input_shares: vec![],
+    };
+
+    let plaintext = "plaintext input share".as_bytes();
+    let payload = hpke_sender.encrypt_input_share(&report, plaintext)?;
+    report.encrypted_input_shares = vec![EncryptedInputShare {
+        config_id: leader_hpke_config.id,
+        encapsulated_context: hpke_sender.encapped_key.to_bytes().as_slice().to_vec(),
+        payload,
+    }];
+
+    let upload_endpoint = ppm_parameters.leader_url.join("upload")?;
+
+    let upload_status = http_client
+        .post(upload_endpoint)
+        .json(&report)
+        .send()
+        .await?
+        .status();
+
+    println!("upload status: {}", upload_status);
+
+    Ok(())
 }
