@@ -1,11 +1,14 @@
 use ::hpke::Serializable;
+use color_eyre::eyre::Result;
 use ppm_prototype::{
-    hpke::{self, Role},
+    hpke::Role,
     parameters::Parameters,
     upload::{EncryptedInputShare, Report},
 };
-
 use reqwest::Client;
+use tracing::info;
+use tracing_error::ErrorLayer;
+use tracing_subscriber::{fmt, fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Registry};
 
 static CLIENT_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
@@ -17,10 +20,6 @@ static CLIENT_USER_AGENT: &str = concat!(
 
 #[derive(Debug, thiserror::Error)]
 enum Error {
-    #[error("reqwest error")]
-    Reqwest(#[from] reqwest::Error),
-    #[error("URL error")]
-    Serde(#[from] url::ParseError),
     #[error("crypto error")]
     Crypto(#[from] ppm_prototype::hpke::Error),
     #[error("upload error")]
@@ -28,18 +27,38 @@ enum Error {
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Error> {
+async fn main() -> Result<()> {
+    // Pretty-print errors
+    color_eyre::install()?;
+
+    // Configure a tracing subscriber. The crate emits events using `info!`,
+    // `err!`, etc. macros from crate `tracing`.
+    let fmt_layer = fmt::layer()
+        .with_span_events(FmtSpan::ENTER | FmtSpan::EXIT)
+        .with_thread_ids(true)
+        // TODO(timg): take an argument for pretty vs. full vs. compact output
+        .pretty()
+        .with_level(true)
+        .with_target(true);
+
+    let subscriber = Registry::default()
+        .with(fmt_layer)
+        // Configure filters with RUST_LOG env var. Format discussed at
+        // https://docs.rs/tracing-subscriber/0.2.20/tracing_subscriber/filter/struct.EnvFilter.html
+        .with(EnvFilter::from_default_env())
+        .with(ErrorLayer::default());
+
+    tracing::subscriber::set_global_default(subscriber)?;
+
+    let main_span = tracing::span!(tracing::Level::INFO, "client main");
+    let _enter = main_span.enter();
+
     let http_client = Client::builder().user_agent(CLIENT_USER_AGENT).build()?;
 
     let ppm_parameters = Parameters::fixed_parameters();
 
-    let hpke_config_endpoint = ppm_parameters.leader_url.join("hpke_config")?;
-
-    let leader_hpke_config: hpke::Config = http_client
-        .get(hpke_config_endpoint)
-        .send()
-        .await?
-        .json()
+    let leader_hpke_config = ppm_parameters
+        .hpke_config(Role::Leader, &http_client)
         .await?;
 
     let mut hpke_sender =
@@ -72,7 +91,7 @@ async fn main() -> Result<(), Error> {
         .await?
         .status();
 
-    println!("upload status: {}", upload_status);
+    info!(?upload_status, "upload complete");
 
     Ok(())
 }

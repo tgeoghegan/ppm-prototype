@@ -4,16 +4,21 @@
 //! and related types.
 
 use rand::{thread_rng, Rng};
+use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
 use url::Url;
 
-use crate::hpke;
+use crate::hpke::{self, Role};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("JSON parse error: {0}")]
     JsonParse(#[from] serde_json::error::Error),
+    #[error("URL error")]
+    Serde(#[from] url::ParseError),
+    #[error("reqwest error")]
+    Reqwest(#[from] reqwest::Error),
 }
 
 /// The configuration parameters for a PPM task, corresponding to
@@ -76,6 +81,32 @@ impl Parameters {
         let mut task_id = [0u8; 32];
         task_id[..self.nonce.len()].copy_from_slice(&self.nonce);
         task_id
+    }
+
+    fn aggregator_endpoint(&self, role: Role) -> &Url {
+        match role {
+            Role::Leader => &self.leader_url,
+            Role::Helper => &self.helper_url,
+        }
+    }
+
+    fn hpke_config_endpoint(&self, role: Role) -> Result<Url, Error> {
+        Ok(self.aggregator_endpoint(role).join("hpke_config")?)
+    }
+
+    #[tracing::instrument]
+    pub async fn hpke_config(
+        &self,
+        role: Role,
+        http_client: &Client,
+    ) -> Result<hpke::Config, Error> {
+        let hpke_config = http_client
+            .get(self.hpke_config_endpoint(role)?)
+            .send()
+            .await?
+            .json()
+            .await?;
+        Ok(hpke_config)
     }
 }
 
