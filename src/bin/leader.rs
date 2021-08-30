@@ -1,19 +1,22 @@
+use color_eyre::eyre::Result;
 use http::StatusCode;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use warp::{reply, Filter};
-
 use ppm_prototype::{
     hpke::{
         AuthenticatedEncryptionWithAssociatedData, Config, KeyDerivationFunction,
         KeyEncapsulationMechanism, Role,
     },
     parameters::Parameters,
+    trace,
     upload::Report,
 };
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use tracing::info;
+use warp::{reply, Filter};
 
 #[tokio::main]
-async fn main() {
-    println!("Hello, leader");
+async fn main() -> Result<()> {
+    color_eyre::install()?;
+    trace::install_subscriber();
 
     let ppm_parameters = Parameters::fixed_parameters();
 
@@ -24,20 +27,20 @@ async fn main() {
     );
 
     let config_clone = config.clone();
-    let hpke_config = warp::get().and(warp::path("hpke_config")).map(move || {
-        println!("handling request to hpke_config");
-        reply::with_status(
-            reply::json(&config_clone.without_private_key()),
-            StatusCode::OK,
-        )
-    });
+    let hpke_config = warp::get()
+        .and(warp::path("hpke_config"))
+        .map(move || {
+            reply::with_status(
+                reply::json(&config_clone.without_private_key()),
+                StatusCode::OK,
+            )
+        })
+        .with(warp::trace::named("hpke_config"));
 
     let upload = warp::post()
         .and(warp::path("upload"))
         .and(warp::body::json())
         .map(move |report: Report| {
-            println!("handling upload request");
-
             if report.task_id != ppm_parameters.task_id() {
                 // TODO(timg) construct problem document with type=unrecognizedTask
                 // per section 3.1
@@ -71,6 +74,9 @@ async fn main() {
                 }
             };
 
+            let decrypted_input = std::str::from_utf8(&decrypted_input_share).unwrap();
+
+            info!(?report, decrypted_input, "obtained report");
             println!(
                 "obtained report {:?}\ndecrypted input {}",
                 report,
@@ -78,10 +84,13 @@ async fn main() {
             );
 
             reply::with_status(reply(), StatusCode::OK)
-        });
+        })
+        .with(warp::trace::named("upload"));
 
-    println!("serving hpke config on 0.0.0.0:8080");
-    warp::serve(hpke_config.or(upload))
+    info!("serving hpke config on 0.0.0.0:8080");
+    warp::serve(hpke_config.or(upload).with(warp::trace::request()))
         .run(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080))
         .await;
+
+    unreachable!()
 }

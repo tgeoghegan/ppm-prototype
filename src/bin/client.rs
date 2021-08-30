@@ -3,12 +3,11 @@ use color_eyre::eyre::Result;
 use ppm_prototype::{
     hpke::Role,
     parameters::Parameters,
+    trace,
     upload::{EncryptedInputShare, Report},
 };
 use reqwest::Client;
 use tracing::info;
-use tracing_error::ErrorLayer;
-use tracing_subscriber::{fmt, fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Registry};
 
 static CLIENT_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
@@ -30,28 +29,7 @@ enum Error {
 async fn main() -> Result<()> {
     // Pretty-print errors
     color_eyre::install()?;
-
-    // Configure a tracing subscriber. The crate emits events using `info!`,
-    // `err!`, etc. macros from crate `tracing`.
-    let fmt_layer = fmt::layer()
-        .with_span_events(FmtSpan::ENTER | FmtSpan::EXIT)
-        .with_thread_ids(true)
-        // TODO(timg): take an argument for pretty vs. full vs. compact output
-        .pretty()
-        .with_level(true)
-        .with_target(true);
-
-    let subscriber = Registry::default()
-        .with(fmt_layer)
-        // Configure filters with RUST_LOG env var. Format discussed at
-        // https://docs.rs/tracing-subscriber/0.2.20/tracing_subscriber/filter/struct.EnvFilter.html
-        .with(EnvFilter::from_default_env())
-        .with(ErrorLayer::default());
-
-    tracing::subscriber::set_global_default(subscriber)?;
-
-    let main_span = tracing::span!(tracing::Level::INFO, "client main");
-    let _enter = main_span.enter();
+    trace::install_subscriber();
 
     let http_client = Client::builder().user_agent(CLIENT_USER_AGENT).build()?;
 
