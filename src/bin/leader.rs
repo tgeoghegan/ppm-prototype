@@ -1,10 +1,7 @@
 use color_eyre::eyre::Result;
 use http::StatusCode;
 use ppm_prototype::{
-    hpke::{
-        AuthenticatedEncryptionWithAssociatedData, Config, KeyDerivationFunction,
-        KeyEncapsulationMechanism, Role,
-    },
+    hpke::{self, Role},
     parameters::Parameters,
     trace,
     upload::Report,
@@ -20,18 +17,14 @@ async fn main() -> Result<()> {
 
     let ppm_parameters = Parameters::from_config_file()?;
 
-    let config = Config::new_recipient(
-        KeyEncapsulationMechanism::X25519HkdfSha256,
-        KeyDerivationFunction::HkdfSha256,
-        AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305,
-    );
+    let hpke_config = hpke::Config::from_config_file()?;
 
-    let config_clone = config.clone();
-    let hpke_config = warp::get()
+    let hpke_config_without_private_key = hpke_config.without_private_key();
+    let hpke_config_endpoint = warp::get()
         .and(warp::path("hpke_config"))
         .map(move || {
             reply::with_status(
-                reply::json(&config_clone.without_private_key()),
+                reply::json(&hpke_config_without_private_key),
                 StatusCode::OK,
             )
         })
@@ -48,7 +41,7 @@ async fn main() -> Result<()> {
             }
 
             for share in &report.encrypted_input_shares {
-                if share.config_id != config.id {
+                if share.config_id != hpke_config.id {
                     // TODO(timg) construct problem document with type=outdatedConfig
                     // per section 3.1
                     return reply::with_status(reply(), StatusCode::BAD_REQUEST);
@@ -57,7 +50,7 @@ async fn main() -> Result<()> {
 
             // Decrypt leader share
             let mut hpke_recipient =
-                match config.report_recipient(&report.task_id, Role::Leader, &report) {
+                match hpke_config.report_recipient(&report.task_id, Role::Leader, &report) {
                     Ok(r) => r,
                     Err(e) => {
                         println!("error constructing recipient: {:?}", e);
@@ -88,7 +81,7 @@ async fn main() -> Result<()> {
         .with(warp::trace::named("upload"));
 
     info!("serving hpke config on 0.0.0.0:8080");
-    warp::serve(hpke_config.or(upload).with(warp::trace::request()))
+    warp::serve(hpke_config_endpoint.or(upload).with(warp::trace::request()))
         .run(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080))
         .await;
 

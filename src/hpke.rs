@@ -1,3 +1,4 @@
+use crate::{config_path, parameters::TaskId, upload::Report};
 use ::hpke::{
     aead::{Aead, AeadTag, AesGcm128, AesGcm256, ChaCha20Poly1305},
     kdf::{HkdfSha256, HkdfSha384, HkdfSha512, Kdf},
@@ -9,8 +10,7 @@ use ::hpke::{
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-
-use crate::{parameters::TaskId, upload::Report};
+use std::{fs::File, path::PathBuf};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -22,6 +22,8 @@ pub enum Error {
     Serde(#[from] serde_json::error::Error),
     #[error("invalid HPKE configuration: {0}")]
     InvalidConfiguration(&'static str),
+    #[error("file error: {1}")]
+    File(#[source] std::io::Error, PathBuf),
 }
 
 #[derive(Copy, Clone, Debug, Serialize_repr, Deserialize_repr, Eq, PartialEq)]
@@ -65,6 +67,15 @@ pub struct Config {
 }
 
 impl Config {
+    /// Load HPKE config from JSON
+    pub fn from_config_file() -> Result<Self, Error> {
+        let hpke_config_path = config_path().join("hpke.json");
+
+        Ok(serde_json::from_reader(
+            File::open(&hpke_config_path).map_err(|e| Error::File(e, hpke_config_path))?,
+        )?)
+    }
+
     /// Generate a new keypair for the requested algorithm and construct a
     /// Config for it
     pub fn new_recipient(

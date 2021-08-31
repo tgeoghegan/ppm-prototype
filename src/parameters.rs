@@ -3,15 +3,16 @@
 //! Provides structures and functionality for dealing with a `struct PPMParam`
 //! and related types.
 
-use directories::ProjectDirs;
+use crate::{
+    config_path,
+    hpke::{self, Role},
+};
 use rand::{thread_rng, Rng};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::{fs::File, io::Read};
 use url::Url;
-
-use crate::hpke::{self, Role};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -42,8 +43,7 @@ pub struct Parameters {
 
 impl Parameters {
     pub fn from_config_file() -> Result<Self, Error> {
-        let project_path = ProjectDirs::from("org", "isrg", "ppm-prototypes").unwrap();
-        let ppm_parameters_path = project_path.config_dir().join("parameters.json");
+        let ppm_parameters_path = config_path().join("parameters.json");
 
         Self::from_json_reader(
             File::open(&ppm_parameters_path).map_err(|e| Error::File(e, ppm_parameters_path))?,
