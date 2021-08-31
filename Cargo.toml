@@ -8,6 +8,7 @@ edition = "2018"
 chrono = { version = "0.4", features = ["serde", "std"] }
 color-eyre = "^0.5"
 derivative = "2.1.1"
+directories = "3.0.2"
 hpke = { path = "/home/timg/source/rust-hpke", features = ["default", "serde_impls", "std"] }
 http = "^0.2"
 rand = "0.8"

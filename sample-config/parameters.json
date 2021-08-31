@@ -1,0 +1,17 @@
+{
+    "task_id": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    "aggregator_urls": [
+        "http://localhost:8080",
+        "http://localhost:8081"
+    ],
+    "collector_config": {
+        "id": 1,
+        "kem_id": 16,
+        "kdf_id": 1,
+        "aead_id": 3,
+        "public_key": [0, 1, 2, 3]
+    },
+    "batch_size": 100,
+    "batch_window": 100000,
+    "protocol": "Prio"
+}

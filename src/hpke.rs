@@ -35,7 +35,7 @@ impl Role {
     /// Returns the index into protocol message vectors at which this role's
     /// entry can be found. e.g., the leader's input share in a `Report` is
     /// `Report.encrypted_input_shares[Role::Leader.role_index()]`.
-    fn index(self) -> usize {
+    pub(crate) fn index(self) -> usize {
         match self {
             Role::Leader => 0,
             Role::Helper => 1,

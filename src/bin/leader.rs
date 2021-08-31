@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     trace::install_subscriber();
 
-    let ppm_parameters = Parameters::fixed_parameters();
+    let ppm_parameters = Parameters::from_config_file()?;
 
     let config = Config::new_recipient(
         KeyEncapsulationMechanism::X25519HkdfSha256,
@@ -41,7 +41,7 @@ async fn main() -> Result<()> {
         .and(warp::path("upload"))
         .and(warp::body::json())
         .map(move |report: Report| {
-            if report.task_id != ppm_parameters.task_id() {
+            if report.task_id != ppm_parameters.task_id {
                 // TODO(timg) construct problem document with type=unrecognizedTask
                 // per section 3.1
                 return reply::with_status(reply(), StatusCode::BAD_REQUEST);
