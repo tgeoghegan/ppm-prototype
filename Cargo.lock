@@ -607,6 +607,7 @@ dependencies = [
 [[package]]
 name = "hpke"
 version = "0.6.0"
+source = "git+https://github.com/tgeoghegan/rust-hpke?branch=timg/clone-encapped-key#8b4c04e13212f8cb6cd59bdb61c6a3dbb36900b5"
 dependencies = [
  "aead",
  "aes-gcm",
