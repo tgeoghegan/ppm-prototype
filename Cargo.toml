@@ -9,7 +9,7 @@ chrono = { version = "0.4", features = ["serde", "std"] }
 color-eyre = "^0.5"
 derivative = "2.1.1"
 directories = "3.0.2"
-hpke = { git = "https://github.com/tgeoghegan/rust-hpke", branch = "timg/clone-encapped-key", features = ["default", "serde_impls", "std"] }
+hpke = { version = "0.7.1", features = ["default", "serde_impls", "std"] }
 http = "^0.2"
 rand = "0.8"
 reqwest = { version = "0.11.4", features = ["rustls", "json"] }

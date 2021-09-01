@@ -606,8 +606,9 @@ dependencies = [
 
 [[package]]
 name = "hpke"
-version = "0.6.0"
-source = "git+https://github.com/tgeoghegan/rust-hpke?branch=timg/clone-encapped-key#8b4c04e13212f8cb6cd59bdb61c6a3dbb36900b5"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b27779b5c326e3afe887e806ab04ac34922a9a723ee3fae62170b3f7ad33380"
 dependencies = [
  "aead",
  "aes-gcm",
