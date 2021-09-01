@@ -1,12 +1,11 @@
 use tracing_error::ErrorLayer;
-use tracing_subscriber::{fmt, fmt::format::FmtSpan, layer::SubscriberExt, EnvFilter, Registry};
+use tracing_subscriber::{fmt, layer::SubscriberExt, EnvFilter, Registry};
 
 /// Configures and installs a tracing subscriber
 pub fn install_subscriber() {
     // Configure a tracing subscriber. The crate emits events using `info!`,
     // `err!`, etc. macros from crate `tracing`.
     let fmt_layer = fmt::layer()
-        .with_span_events(FmtSpan::ENTER | FmtSpan::EXIT)
         .with_thread_ids(true)
         // TODO(timg): take an argument for pretty vs. full vs. compact vs. JSON
         // output
