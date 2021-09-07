@@ -13,5 +13,9 @@
     },
     "batch_size": 100,
     "batch_window": 100000,
-    "protocol": "Prio"
+    "Prio": {
+        "joint_rand": [[134, 97, 148, 108, 28, 17, 66, 206]],
+        "field": "Field64",
+        "type": "Boolean"
+    }
 }

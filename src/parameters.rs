@@ -16,7 +16,7 @@ use url::Url;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("JSON parse error: {0}")]
+    #[error("JSON parse error")]
     JsonParse(#[from] serde_json::error::Error),
     #[error("URL error")]
     Serde(#[from] url::ParseError),
@@ -37,8 +37,8 @@ pub struct Parameters {
     // TODO: use something like std::time::Duration or chrono::Duration _but_
     // with serde support
     pub batch_window: u64,
-    pub protocol: Protocol,
-    // TBD Prio or Hits specific fields
+    #[serde(flatten)]
+    pub protocol_parameters: ProtocolParameters,
 }
 
 impl Parameters {
@@ -96,13 +96,38 @@ pub fn new_task_id() -> TaskId {
     thread_rng().gen::<[u8; 32]>()
 }
 
-/// The PPM protocols supported in this implementation.
+/// The protocol specific portions of Parameters
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub enum Protocol {
-    /// The Prio private aggregation system
-    Prio,
-    /// Heavy Hitters
-    HeavyHitters,
+pub enum ProtocolParameters {
+    /// Prio-specific parameters
+    Prio {
+        /// The joint randomness, used to generate and verify proofs.
+        // TODO(timg) Each vector is itself a serialized FieldElement, because
+        // we don't yet have decent serde on FieldElement.
+        joint_rand: Vec<Vec<u8>>,
+        field: PrioField,
+        // `type` is a reserved keyword in Rust
+        #[serde(rename = "type")]
+        prio_type: PrioType,
+    },
+    Hits,
+}
+
+/// Field sizes for use in Prio types. These correspond to types in
+/// prio::pcp::field.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub enum PrioField {
+    Field64,
+    Field80,
+    Field126,
+}
+
+/// Types for use in Prio. These correspond to types in prio::pcp::types.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub enum PrioType {
+    Boolean,
+    MeanVarUnsignedVector,
+    PolyCheckedVector,
 }
 
 #[cfg(test)]
@@ -127,7 +152,11 @@ mod tests {
     },
     "batch_size": 100,
     "batch_window": 100000,
-    "protocol": "Prio"
+    "Prio": {
+        "joint_rand": [[1]],
+        "field": "Field80",
+        "type": "PolyCheckedVector"
+    }
 }
 "#;
 

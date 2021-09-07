@@ -6,8 +6,15 @@ use ppm_prototype::{
     trace,
     upload::Report,
 };
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use tracing::info;
+use prio::{
+    field::{Field64, FieldElement},
+    pcp::{query, types::Boolean, Proof, Value},
+};
+use std::{
+    convert::TryFrom,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+};
+use tracing::{error, info};
 use warp::{reply, Filter};
 
 #[tokio::main]
@@ -16,19 +23,11 @@ async fn main() -> Result<()> {
     trace::install_subscriber();
 
     let ppm_parameters = Parameters::from_config_file()?;
-
+    let port = ppm_parameters.aggregator_urls[Role::Leader.index()]
+        .port()
+        .unwrap_or(80);
     let hpke_config = hpke::Config::from_config_file()?;
-
-    let hpke_config_without_private_key = hpke_config.without_private_key();
-    let hpke_config_endpoint = warp::get()
-        .and(warp::path("hpke_config"))
-        .map(move || {
-            reply::with_status(
-                reply::json(&hpke_config_without_private_key),
-                StatusCode::OK,
-            )
-        })
-        .with(warp::trace::named("hpke_config"));
+    let hpke_config_endpoint = hpke_config.warp_endpoint();
 
     let upload = warp::post()
         .and(warp::path("upload"))
@@ -53,7 +52,7 @@ async fn main() -> Result<()> {
                 match hpke_config.report_recipient(&report.task_id, Role::Leader, &report) {
                     Ok(r) => r,
                     Err(e) => {
-                        println!("error constructing recipient: {:?}", e);
+                        error!("error constructing recipient: {:?}", e);
                         return reply::with_status(reply(), StatusCode::INTERNAL_SERVER_ERROR);
                     }
                 };
@@ -62,27 +61,36 @@ async fn main() -> Result<()> {
                 Ok(share) => share,
                 Err(e) => {
                     // TODO(timg) construct problem document with type=unrecognizedMessage
-                    println!("error decrypting shares: {:?}", e);
+                    error!("error decrypting shares: {:?}", e);
                     return reply::with_status(reply(), StatusCode::BAD_REQUEST);
                 }
             };
 
-            let decrypted_input = std::str::from_utf8(&decrypted_input_share).unwrap();
+            let deserialized_data: Vec<Field64> =
+                match Field64::byte_slice_into_vec(&decrypted_input_share) {
+                    Ok(data) => data,
+                    Err(e) => {
+                        error!("error deserializing shares: {:?}", e);
+                        return reply::with_status(reply(), StatusCode::BAD_REQUEST);
+                    }
+                };
 
-            info!(?report, decrypted_input, "obtained report");
-            println!(
-                "obtained report {:?}\ndecrypted input {}",
-                report,
-                std::str::from_utf8(&decrypted_input_share).unwrap(),
-            );
+            // Boolean::try_from is infallible
+            // TODO(timg): we need the "Param" to deserialize the value, but we
+            // need an instance of the param to do that.
+            let _input_share: Boolean<Field64> =
+                Boolean::try_from(((), &deserialized_data[..1])).unwrap();
+
+            info!(?report, "obtained report");
 
             reply::with_status(reply(), StatusCode::OK)
         })
         .with(warp::trace::named("upload"));
 
-    info!("serving hpke config on 0.0.0.0:8080");
+    info!("leader serving on 0.0.0.0:{}", port);
+
     warp::serve(hpke_config_endpoint.or(upload).with(warp::trace::request()))
-        .run(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), 8080))
+        .run(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port))
         .await;
 
     unreachable!()

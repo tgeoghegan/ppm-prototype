@@ -7,10 +7,12 @@ use ::hpke::{
     setup_receiver, setup_sender, AeadCtxR, AeadCtxS, Deserializable, EncappedKey, HpkeError, Kem,
     OpModeR, OpModeS, Serializable,
 };
+use http::StatusCode;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::{fs::File, path::PathBuf};
+use warp::{filters::BoxedFilter, reply, Filter, Reply};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -37,7 +39,7 @@ impl Role {
     /// Returns the index into protocol message vectors at which this role's
     /// entry can be found. e.g., the leader's input share in a `Report` is
     /// `Report.encrypted_input_shares[Role::Leader.role_index()]`.
-    pub(crate) fn index(self) -> usize {
+    pub fn index(self) -> usize {
         match self {
             Role::Leader => 0,
             Role::Helper => 1,
@@ -116,9 +118,20 @@ impl Config {
         }
     }
 
+    pub fn warp_endpoint(&self) -> BoxedFilter<(impl Reply,)> {
+        let config_without_private_key = self.without_private_key();
+        warp::get()
+            .and(warp::path("hpke_config"))
+            .map(move || {
+                reply::with_status(reply::json(&config_without_private_key), StatusCode::OK)
+            })
+            .with(warp::trace::named("hpke_config"))
+            .boxed()
+    }
+
     /// Create a copy of the config without the private key, suitable for
     /// public advertising of HPKE config
-    pub fn without_private_key(&self) -> Self {
+    fn without_private_key(&self) -> Self {
         let mut copy = self.clone();
         copy.private_key = None;
         copy
