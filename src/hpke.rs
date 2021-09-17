@@ -243,10 +243,13 @@ pub enum AuthenticatedEncryptionWithAssociatedData {
     ChaCha20Poly1305 = <ChaCha20Poly1305 as Aead>::AEAD_ID,
 }
 
+pub type DefaultSender =
+    Sender<hpke::aead::ChaCha20Poly1305, hpke::kdf::HkdfSha256, hpke::kem::X25519HkdfSha256>;
+
 /// An HPKE sender that encrypts messages to some recipient public key using
 /// a chosen set of AEAD, key derivation and key encapsulation algorithms.
 pub struct Sender<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> {
-    pub encapped_key: EncappedKey<Encapsulate::Kex>,
+    encapped_key: EncappedKey<Encapsulate::Kex>,
     context: AeadCtxS<Encrypt, Derive, Encapsulate>,
 }
 
@@ -281,14 +284,22 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
 
     /// Encrypt the plaintext, incorporating AAD derived from `report`, and
     /// return the ciphertext, which consists of (ciphertext || tag), and is
-    /// suitable as the value of `EncryptedInputShare.payload`.
+    /// suitable as the value of `EncryptedInputShare.payload`. Also returns the
+    /// encapped public key for sending to recipient.
+    ///
+    /// In PPM, an HPKE context can only be used once (we have no means of
+    /// ensuring that sender and recipient "increment" nonces in lockstep), so
+    /// this method consumes self.
     pub fn encrypt_input_share(
-        &mut self,
+        mut self,
         report: &Report,
         plaintext: &[u8],
-    ) -> Result<Vec<u8>, Error> {
+    ) -> Result<(Vec<u8>, EncappedKey<Encapsulate::Kex>), Error> {
         let (ciphertext, tag) = self.seal(plaintext, &report.associated_data())?;
-        Ok([&ciphertext, tag.to_bytes().as_slice()].concat())
+        Ok((
+            [&ciphertext, tag.to_bytes().as_slice()].concat(),
+            self.encapped_key,
+        ))
     }
 
     fn seal(
@@ -344,7 +355,11 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
 
     /// Decrypt the input share from `report` for this `Recipient`'s server role
     /// and return the plaintext.
-    pub fn decrypt_input_share(&mut self, report: &Report) -> Result<Vec<u8>, Error> {
+    ///
+    /// In PPM, an HPKE context can only be used once (we have no means of
+    /// ensuring that sender and recipient "increment" nonces in lockstep), so
+    /// this method consumes self.
+    pub fn decrypt_input_share(mut self, report: &Report) -> Result<Vec<u8>, Error> {
         let tag_len = AeadTag::<Encrypt>::size();
         let payload = &report.encrypted_input_shares[self.role.index()].payload;
 
@@ -385,11 +400,9 @@ mod tests {
         let application_info = b"shared application info";
 
         // Sender and receiver must agree on AAD for each message
-        let message_associated_data_one = b"first message associated data";
-        let message_associated_data_two = b"second message associated data";
+        let message_associated_data = b"message associated data";
 
-        let message_one = b"a message that is secret";
-        let message_two = b"another message that is secret";
+        let message = b"a message that is secret";
 
         let config = Config::new_recipient(
             KeyEncapsulationMechanism::X25519HkdfSha256,
@@ -418,12 +431,7 @@ mod tests {
             (_, _, _) => unimplemented!("unsupported set of algos"),
         };
 
-        let (ciphertext_one, tag_one) = sender
-            .seal(message_one, message_associated_data_one)
-            .unwrap();
-        let (ciphertext_two, tag_two) = sender
-            .seal(message_two, message_associated_data_two)
-            .unwrap();
+        let (ciphertext, tag) = sender.seal(message, message_associated_data).unwrap();
 
         let mut recipient = match (&config.kem_id, &config.kdf_id, &config.aead_id) {
             (
@@ -440,22 +448,10 @@ mod tests {
             (_, _, _) => unimplemented!("unsupported set of algos"),
         };
 
-        let plaintext_one = recipient
-            .open(
-                &ciphertext_one,
-                message_associated_data_one,
-                &tag_one.to_bytes(),
-            )
-            .unwrap();
-        let plaintext_two = recipient
-            .open(
-                &ciphertext_two,
-                message_associated_data_two,
-                &tag_two.to_bytes(),
-            )
+        let plaintext = recipient
+            .open(&ciphertext, message_associated_data, &tag.to_bytes())
             .unwrap();
 
-        assert_eq!(plaintext_one, message_one);
-        assert_eq!(plaintext_two, message_two);
+        assert_eq!(plaintext, message);
     }
 }

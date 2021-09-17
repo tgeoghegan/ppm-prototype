@@ -1,19 +1,18 @@
 use color_eyre::eyre::Result;
 use http::StatusCode;
 use ppm_prototype::{
+    aggregate::LeaderAggregator,
     hpke::{self, Role},
     parameters::Parameters,
     trace,
     upload::Report,
-};
-use prio::{
-    field::{Field64, FieldElement},
-    pcp::{query, types::Boolean, Proof, Value},
+    with_shared_value,
 };
 use std::{
-    convert::TryFrom,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
 };
+use tokio::sync::Mutex;
 use tracing::{error, info};
 use warp::{reply, Filter};
 
@@ -29,67 +28,34 @@ async fn main() -> Result<()> {
     let hpke_config = hpke::Config::from_config_file()?;
     let hpke_config_endpoint = hpke_config.warp_endpoint();
 
+    let leader_aggregator = Arc::new(Mutex::new(LeaderAggregator::new(
+        &ppm_parameters,
+        &hpke_config,
+    )));
+
     let upload = warp::post()
         .and(warp::path("upload"))
         .and(warp::body::json())
-        .map(move |report: Report| {
-            if report.task_id != ppm_parameters.task_id {
-                // TODO(timg) construct problem document with type=unrecognizedTask
-                // per section 3.1
-                return reply::with_status(reply(), StatusCode::BAD_REQUEST);
-            }
-
-            for share in &report.encrypted_input_shares {
-                if share.config_id != hpke_config.id {
-                    // TODO(timg) construct problem document with type=outdatedConfig
-                    // per section 3.1
-                    return reply::with_status(reply(), StatusCode::BAD_REQUEST);
-                }
-            }
-
-            // Decrypt leader share
-            let mut hpke_recipient =
-                match hpke_config.report_recipient(&report.task_id, Role::Leader, &report) {
-                    Ok(r) => r,
+        .and(with_shared_value(leader_aggregator.clone()))
+        .and_then(
+            |report: Report, leader_aggregator: Arc<Mutex<LeaderAggregator>>| async move {
+                match leader_aggregator.lock().await.handle_upload(&report).await {
+                    Ok(()) => Ok(reply::with_status(reply(), StatusCode::OK)),
                     Err(e) => {
-                        error!("error constructing recipient: {:?}", e);
-                        return reply::with_status(reply(), StatusCode::INTERNAL_SERVER_ERROR);
+                        error!("{:?}", e);
+                        // TODO wire up a type that implements Reject and attach
+                        // a warp reject handler that constructs appropriate responses
+                        Err(warp::reject::not_found())
                     }
-                };
-
-            let decrypted_input_share = match hpke_recipient.decrypt_input_share(&report) {
-                Ok(share) => share,
-                Err(e) => {
-                    // TODO(timg) construct problem document with type=unrecognizedMessage
-                    error!("error decrypting shares: {:?}", e);
-                    return reply::with_status(reply(), StatusCode::BAD_REQUEST);
                 }
-            };
-
-            let deserialized_data: Vec<Field64> =
-                match Field64::byte_slice_into_vec(&decrypted_input_share) {
-                    Ok(data) => data,
-                    Err(e) => {
-                        error!("error deserializing shares: {:?}", e);
-                        return reply::with_status(reply(), StatusCode::BAD_REQUEST);
-                    }
-                };
-
-            // Boolean::try_from is infallible
-            // TODO(timg): we need the "Param" to deserialize the value, but we
-            // need an instance of the param to do that.
-            let _input_share: Boolean<Field64> =
-                Boolean::try_from(((), &deserialized_data[..1])).unwrap();
-
-            info!(?report, "obtained report");
-
-            reply::with_status(reply(), StatusCode::OK)
-        })
+            },
+        )
         .with(warp::trace::named("upload"));
 
-    info!("leader serving on 0.0.0.0:{}", port);
+    let routes = hpke_config_endpoint.or(upload).with(warp::trace::request());
 
-    warp::serve(hpke_config_endpoint.or(upload).with(warp::trace::request()))
+    info!("leader serving on 0.0.0.0:{}", port);
+    warp::serve(routes)
         .run(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port))
         .await;
 

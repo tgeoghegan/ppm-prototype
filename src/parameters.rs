@@ -6,6 +6,7 @@
 use crate::{
     config_path,
     hpke::{self, Role},
+    Duration,
 };
 use rand::{thread_rng, Rng};
 use reqwest::Client;
@@ -19,7 +20,7 @@ pub enum Error {
     #[error("JSON parse error")]
     JsonParse(#[from] serde_json::error::Error),
     #[error("URL error")]
-    Serde(#[from] url::ParseError),
+    Url(#[from] url::ParseError),
     #[error("reqwest error")]
     Reqwest(#[from] reqwest::Error),
     #[error("file error: {1}")]
@@ -30,13 +31,15 @@ pub enum Error {
 /// `struct Param` in §4.1 of RFCXXXX.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Parameters {
-    pub task_id: [u8; 32],
+    pub task_id: TaskId,
     pub aggregator_urls: Vec<Url>,
     pub collector_config: hpke::Config,
-    pub batch_size: u64,
-    // TODO: use something like std::time::Duration or chrono::Duration _but_
-    // with serde support
-    pub batch_window: u64,
+    /// Maximum number of queries allowed against a batch.
+    pub max_batch_lifetime: u64,
+    /// Minimum number of reports in a batch
+    pub min_batch_size: u64,
+    /// Minimum time elapsed between start and end of a batch
+    pub min_batch_duration: Duration,
     #[serde(flatten)]
     pub protocol_parameters: ProtocolParameters,
 }
@@ -86,6 +89,20 @@ impl Parameters {
     pub fn upload_endpoint(&self) -> Result<Url, Error> {
         Ok(self.aggregator_endpoint(Role::Leader).join("upload")?)
     }
+
+    pub fn collect_endpoint(&self) -> Result<Url, Error> {
+        Ok(self.aggregator_endpoint(Role::Leader).join("collect")?)
+    }
+
+    pub fn aggregate_endpoint(&self) -> Result<Url, Error> {
+        Ok(self.aggregator_endpoint(Role::Helper).join("aggregate")?)
+    }
+
+    pub fn output_share_endpoint(&self) -> Result<Url, Error> {
+        Ok(self
+            .aggregator_endpoint(Role::Helper)
+            .join("output_share")?)
+    }
 }
 
 /// Corresponds to a `TaskID`, defined in §4.1 of RFCXXXX. The task ID is
@@ -101,16 +118,12 @@ pub fn new_task_id() -> TaskId {
 pub enum ProtocolParameters {
     /// Prio-specific parameters
     Prio {
-        /// The joint randomness, used to generate and verify proofs.
-        // TODO(timg) Each vector is itself a serialized FieldElement, because
-        // we don't yet have decent serde on FieldElement.
-        joint_rand: Vec<Vec<u8>>,
         field: PrioField,
         // `type` is a reserved keyword in Rust
         #[serde(rename = "type")]
         prio_type: PrioType,
     },
-    Hits,
+    Hits {},
 }
 
 /// Field sizes for use in Prio types. These correspond to types in
@@ -126,8 +139,8 @@ pub enum PrioField {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum PrioType {
     Boolean,
-    MeanVarUnsignedVector,
-    PolyCheckedVector,
+    MeanVarUnsignedVector { bits: usize },
+    PolyCheckedVector { start: usize, end: usize },
 }
 
 #[cfg(test)]
@@ -150,12 +163,17 @@ mod tests {
         "aead_id": 3,
         "public_key": [0, 1, 2, 3]
     },
-    "batch_size": 100,
-    "batch_window": 100000,
+    "max_batch_lifetime": 1,
+    "min_batch_size": 100,
+    "min_batch_duration": 100000,
     "Prio": {
-        "joint_rand": [[1]],
         "field": "Field80",
-        "type": "PolyCheckedVector"
+        "type": {
+            "PolyCheckedVector": {
+                "start": 0,
+                "end": 2
+            }
+        }
     }
 }
 "#;

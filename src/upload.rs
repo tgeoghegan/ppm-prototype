@@ -1,10 +1,9 @@
 //! The upload portion of the PPM protocol, per §3.3 of RFCXXXX
 
+use crate::{parameters::TaskId, Time};
 use derivative::Derivative;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
-
-use crate::parameters::TaskId;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -13,9 +12,6 @@ pub enum Error {
     #[error("encryption error")]
     Encryption(#[from] crate::hpke::Error),
 }
-
-/// Seconds elapsed since start of UNIX epoch
-pub type Time = u64;
 
 /// A report submitted by a client to a leader, corresponding to `struct
 /// Report` in §4.2.2 of RFCXXXX.
@@ -69,11 +65,21 @@ pub enum ReportExtensionType {
 #[derive(Clone, Derivative, PartialEq, Eq, Deserialize, Serialize)]
 #[derivative(Debug)]
 pub struct EncryptedInputShare {
-    pub config_id: u8,
+    pub aggregator_config_id: u8,
     #[serde(rename = "enc")]
+    #[derivative(Debug = "ignore")]
     pub encapsulated_context: Vec<u8>,
     /// This is understood to be ciphertext || tag
+    #[derivative(Debug = "ignore")]
     pub payload: Vec<u8>,
+}
+
+/// The decrypted contents of EncryptedInputShare.payload for Prio
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
+pub struct PrioInputShare {
+    proof: Vec<u8>,
+    input: Vec<u8>,
+    joint_rand: Vec<u8>,
 }
 
 #[cfg(test)]
@@ -95,7 +101,7 @@ mod tests {
     ],
     "encrypted_input_shares": [
         {
-            "config_id": 1,
+            "aggregator_config_id": 1,
             "enc": [0, 1, 2, 3, 4, 5, 6, 7, 8],
             "payload": [0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8, 0, 1, 2, 3, 4, 5, 6, 7, 8]
         }
