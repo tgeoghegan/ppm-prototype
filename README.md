@@ -11,7 +11,7 @@ The various binary targets get all their configuration (PPM parameters and HPKE
 configs) from JSON files found in the standard location for config files. On
 Linux, that's `~/.config/ppm-prototype` [elsewhere on other platforms](https://docs.rs/directories/3.0.2/directories/index.html).
 
-To get started, you can use the config files from `sample-config`:
+To get started on Linux, you can use the config files from `sample-config`:
 
     cp sample-config/parameters.json ~/.config/ppm-prototype/
     cp sample-config/hpke.json ~/.config/ppm-prototype/
