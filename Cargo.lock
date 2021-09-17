@@ -1173,6 +1173,7 @@ checksum = "ac74c624d6b2d21f425f752262f42188365d7b8ff1aff74c82e45136510a4857"
 [[package]]
 name = "prio"
 version = "0.4.0"
+source = "git+https://github.com/abetterinternet/libprio-rs?branch=timg/ppm-tweaks#87a10fca747774804b427543aa00b5a8b09abd0e"
 dependencies = [
  "aes",
  "aes-gcm",

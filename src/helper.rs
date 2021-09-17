@@ -164,11 +164,9 @@ impl Helper {
             );
 
             // Kinda unfortunate here that `verify_finish` consumes verifier
-            // shares:
-            // 1 - I need a reference to the verifier message so I can send it
-            //     back to leader
-            // 2 - Having Vec<VerifierMessage> instead of &[VerifierMessage]
-            //     forces allocation + copy to the heap
+            // shares: taking Vec<VerifierMessage> instead of &[VerifierMessage]
+            // forces allocation + copy to the heap, even if I own the value of
+            // leader_verifier_message, and it's not clear that I do.
             let helper_verifier_message =
                 match verify_finish(state, vec![leader_verifier_message.clone()]) {
                     Ok(input_share) => {
