@@ -1,6 +1,8 @@
 pub mod aggregate;
 pub mod collect;
+pub mod helper;
 pub mod hpke;
+pub mod leader;
 pub mod parameters;
 pub mod trace;
 pub mod upload;

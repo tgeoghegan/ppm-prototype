@@ -1,8 +1,8 @@
 use color_eyre::eyre::Result;
 use http::StatusCode;
 use ppm_prototype::{
-    aggregate::LeaderAggregator,
     hpke::{self, Role},
+    leader::Leader,
     parameters::Parameters,
     trace,
     upload::Report,
@@ -28,28 +28,23 @@ async fn main() -> Result<()> {
     let hpke_config = hpke::Config::from_config_file()?;
     let hpke_config_endpoint = hpke_config.warp_endpoint();
 
-    let leader_aggregator = Arc::new(Mutex::new(LeaderAggregator::new(
-        &ppm_parameters,
-        &hpke_config,
-    )));
+    let leader_aggregator = Arc::new(Mutex::new(Leader::new(&ppm_parameters, &hpke_config)));
 
     let upload = warp::post()
         .and(warp::path("upload"))
         .and(warp::body::json())
         .and(with_shared_value(leader_aggregator.clone()))
-        .and_then(
-            |report: Report, leader_aggregator: Arc<Mutex<LeaderAggregator>>| async move {
-                match leader_aggregator.lock().await.handle_upload(&report).await {
-                    Ok(()) => Ok(reply::with_status(reply(), StatusCode::OK)),
-                    Err(e) => {
-                        error!(error = ?e, "failed to handle upload");
-                        // TODO wire up a type that implements Reject and attach
-                        // a warp reject handler that constructs appropriate responses
-                        Err(warp::reject::not_found())
-                    }
+        .and_then(|report: Report, leader: Arc<Mutex<Leader>>| async move {
+            match leader.lock().await.handle_upload(&report).await {
+                Ok(()) => Ok(reply::with_status(reply(), StatusCode::OK)),
+                Err(e) => {
+                    error!(error = ?e, "failed to handle upload");
+                    // TODO wire up a type that implements Reject and attach
+                    // a warp reject handler that constructs appropriate responses
+                    Err(warp::reject::not_found())
                 }
-            },
-        )
+            }
+        })
         .with(warp::trace::named("upload"));
 
     let routes = hpke_config_endpoint.or(upload).with(warp::trace::request());

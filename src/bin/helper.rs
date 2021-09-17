@@ -1,7 +1,8 @@
 use color_eyre::eyre::Result;
 use http::StatusCode;
 use ppm_prototype::{
-    aggregate::{AggregateRequest, HelperAggregator},
+    aggregate::AggregateRequest,
+    helper::Helper,
     hpke::{self, Role},
     parameters::Parameters,
     trace,
@@ -28,7 +29,10 @@ async fn main() -> Result<()> {
         .and(warp::path("aggregate"))
         .and(warp::body::json())
         .map(move |aggregate_request: AggregateRequest<Field64>| {
-            let mut helper_aggregator = match HelperAggregator::new(
+            // We intentionally create a new instance of Helper every time we
+            // handle a request to prove that we can successfully execute the
+            // protocol without maintaining local state
+            let mut helper_aggregator = match Helper::new(
                 &ppm_parameters,
                 &hpke_config,
                 &aggregate_request.helper_state,
