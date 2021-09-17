@@ -4,9 +4,9 @@ use crate::{
     hpke::{self, Role},
     parameters::{Parameters, TaskId},
     upload::{EncryptedInputShare, Report, ReportExtension},
-    Duration, Time,
+    Timestamp,
 };
-use chrono::{DateTime, DurationRound, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use http::StatusCode;
 use prio::{
     field::{merge_vector, Field64, FieldElement, FieldError},
@@ -15,7 +15,7 @@ use prio::{
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{cmp::Ordering, collections::HashMap};
+use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
 use tracing::{error, info, warn};
 
 static LEADER_USER_AGENT: &str = concat!(
@@ -69,8 +69,8 @@ pub struct AggregateRequest<F: FieldElement> {
 /// Sub-request in an aggregate request
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AggregateSubRequest<F: FieldElement> {
-    pub time: Time,
-    pub nonce: u64,
+    #[serde(flatten)]
+    pub timestamp: Timestamp,
     pub extensions: Vec<ReportExtension>,
     pub helper_share: EncryptedInputShare,
     #[serde(flatten)]
@@ -83,7 +83,7 @@ pub enum ProtocolAggregateSubRequestFields<F: FieldElement> {
     /// Prio-specific parameters
     Prio {
         /// Message containing the leader's proof/verifier share.
-        verifier_message: VerifierMessage<F>,
+        leader_verifier_message: VerifierMessage<F>,
     },
     Hits {},
 }
@@ -98,8 +98,8 @@ pub struct AggregateResponse<F: FieldElement> {
 /// Sub-response in an aggregation response
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct AggregateSubResponse<F: FieldElement> {
-    pub time: Time,
-    pub nonce: u64,
+    #[serde(flatten)]
+    pub timestamp: Timestamp,
     #[serde(flatten)]
     pub protocol_parameters: ProtocolAggregateSubResponseFields<F>,
 }
@@ -112,7 +112,7 @@ pub enum ProtocolAggregateSubResponseFields<F: FieldElement> {
         /// If the helper was able to verify the proof using the leader's
         /// verifier share, this will be the helper's verifier/proof share. If
         /// the proof verification failed, this will be None.
-        verifier_message: Option<VerifierMessage<F>>,
+        helper_verifier_message: Option<VerifierMessage<F>>,
     },
     Hits {},
 }
@@ -120,8 +120,7 @@ pub enum ProtocolAggregateSubResponseFields<F: FieldElement> {
 /// In-memory representation of an input stored by the leader
 #[derive(Clone, Debug)]
 pub struct StoredInputShare<F: FieldElement, V: Value<F>> {
-    pub time: Time,
-    pub nonce: u64,
+    pub timestamp: Timestamp,
     pub leader_state: AggregatorState<F, V>,
     pub leader_verifier_message: VerifierMessage<F>,
     pub encrypted_helper_share: EncryptedInputShare,
@@ -130,7 +129,7 @@ pub struct StoredInputShare<F: FieldElement, V: Value<F>> {
 
 impl<F: FieldElement, V: Value<F>> PartialEq for StoredInputShare<F, V> {
     fn eq(&self, other: &Self) -> bool {
-        self.time == other.time && self.nonce == other.nonce
+        self.timestamp.eq(&other.timestamp)
     }
 }
 
@@ -138,16 +137,7 @@ impl<F: FieldElement, V: Value<F>> Eq for StoredInputShare<F, V> {}
 
 impl<F: FieldElement, V: Value<F>> Ord for StoredInputShare<F, V> {
     fn cmp(&self, other: &Self) -> Ordering {
-        // Comparison per RFCXXXX §4.4.2
-        if other.time == self.time && other.nonce == self.nonce {
-            return Ordering::Equal;
-        }
-
-        if other.time > self.time || (other.time == self.time && other.nonce > self.nonce) {
-            return Ordering::Less;
-        }
-
-        Ordering::Greater
+        self.timestamp.cmp(&other.timestamp)
     }
 }
 
@@ -157,16 +147,28 @@ impl<F: FieldElement, V: Value<F>> PartialOrd for StoredInputShare<F, V> {
     }
 }
 
-impl<F: FieldElement, V: Value<F>> StoredInputShare<F, V> {
-    /// Determine the start of the aggregation window that this report falls in,
-    /// assuming the provided minimum batch duration
-    pub fn interval_start(&self, min_batch_duration: Duration) -> DateTime<Utc> {
-        Utc.timestamp(self.time as i64, 0)
-            .duration_trunc(chrono::Duration::seconds(min_batch_duration as i64))
-            .unwrap()
+/// Accumulator for some aggregation interval
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Accumulator {
+    /// The value accumulated thus far
+    accumulated: Vec<Field64>,
+    /// How many contributions are included
+    contributions: usize,
+}
+
+fn dump_accumulators(accumulators: &HashMap<DateTime<Utc>, Accumulator>) {
+    for (interval_start, accumulated) in accumulators {
+        info!(
+            interval_start = ?interval_start,
+            accumulated = ?accumulated,
+            "accumulated value for interval"
+        );
     }
 }
 
+/// Implements endpoints the leader supports and tracks leader state.
+// TODO(timg): this should be generic in <F: FieldElement, V: Value<F>>, but I
+// don't yet know how to deal with the V::Param argument to `verify_start`
 #[derive(Clone, Debug)]
 pub struct LeaderAggregator {
     parameters: Parameters,
@@ -178,10 +180,8 @@ pub struct LeaderAggregator {
     /// 4.3.1.
     unaggregated_inputs: Vec<StoredInputShare<Field64, Boolean<Field64>>>,
     /// Accumulated sums over inputs that have been verified in conjunction with
-    /// the helper. The key is the start of the batch window. The value is a
-    /// tuple of the accumulated value so far and the number of contributions
-    /// so far.
-    accumulators: HashMap<DateTime<Utc>, (Vec<Field64>, usize)>,
+    /// the helper. The key is the start of the batch window.
+    accumulators: HashMap<DateTime<Utc>, Accumulator>,
     helper_state: Vec<u8>,
 }
 
@@ -203,21 +203,24 @@ impl LeaderAggregator {
             return Err(Error::UnknownTaskId(report.task_id));
         }
 
-        for share in &report.encrypted_input_shares {
-            if share.aggregator_config_id != self.hpke_config.id {
-                // TODO(timg) construct problem document with type=outdatedConfig
-                // per section 3.1
-                return Err(Error::UnknownHpkeConfig(share.aggregator_config_id));
-            }
+        let leader_share = &report.encrypted_input_shares[Role::Leader.index()];
+
+        if leader_share.aggregator_config_id != self.hpke_config.id {
+            // TODO(timg) construct problem document with type=outdatedConfig
+            // per section 3.1
+            return Err(Error::UnknownHpkeConfig(leader_share.aggregator_config_id));
         }
 
         // Decrypt and decode leader UploadMessage. We must create a new context
         // for each message or the nonces won't line up with the sender.
-        let hpke_recipient =
-            self.hpke_config
-                .report_recipient(&report.task_id, Role::Leader, report)?;
+        let hpke_recipient = self.hpke_config.report_recipient(
+            &report.task_id,
+            Role::Leader,
+            &leader_share.encapsulated_context,
+        )?;
 
-        let decrypted_input_share = hpke_recipient.decrypt_input_share(report)?;
+        let decrypted_input_share = hpke_recipient
+            .decrypt_input_share(leader_share, &report.timestamp.associated_data())?;
 
         let upload_message: UploadMessage<Field64> =
             serde_json::from_slice(&decrypted_input_share)?;
@@ -230,8 +233,7 @@ impl LeaderAggregator {
         )?;
 
         self.unaggregated_inputs.push(StoredInputShare {
-            time: report.time,
-            nonce: report.nonce,
+            timestamp: report.timestamp,
             leader_state: state,
             leader_verifier_message: verifier,
             encrypted_helper_share: report.encrypted_input_shares[Role::Helper.index()].clone(),
@@ -268,12 +270,11 @@ impl LeaderAggregator {
             .unaggregated_inputs
             .iter()
             .map(|stored_input| AggregateSubRequest {
-                time: stored_input.time,
-                nonce: stored_input.nonce,
+                timestamp: stored_input.timestamp,
                 extensions: stored_input.extensions.clone(),
                 helper_share: stored_input.encrypted_helper_share.clone(),
                 protocol_parameters: ProtocolAggregateSubRequestFields::Prio {
-                    verifier_message: stored_input.leader_verifier_message.clone(),
+                    leader_verifier_message: stored_input.leader_verifier_message.clone(),
                 },
             })
             .collect();
@@ -319,27 +320,21 @@ impl LeaderAggregator {
         {
             // Sub-responses from helper must appear in the same order as the
             // sub-requests sent by leader
-            if leader_input.time != helper_response.time
-                || leader_input.nonce != helper_response.nonce
-            {
+            if leader_input.timestamp != helper_response.timestamp {
                 return Err(Error::AggregateProtocol(format!(
-                    "helper responses in wrong order. Wanted {}.{}, got {}.{}",
-                    leader_input.time,
-                    leader_input.nonce,
-                    helper_response.time,
-                    helper_response.nonce
+                    "helper responses in wrong order. Wanted {}, got {}",
+                    leader_input.timestamp, helper_response.timestamp,
                 )));
             }
 
             let helper_verifier_message = match helper_response.protocol_parameters {
                 ProtocolAggregateSubResponseFields::Prio {
-                    verifier_message: message,
+                    helper_verifier_message: message,
                 } => match message {
                     Some(message) => message,
                     None => {
                         info!(
-                            time = leader_input.time,
-                            nonce = leader_input.nonce,
+                            time = ?leader_input.timestamp,
                             "helper rejected proof for report"
                         );
                         continue;
@@ -347,25 +342,40 @@ impl LeaderAggregator {
                 },
                 _ => {
                     return Err(Error::AggregateProtocol(format!(
-                        "unsupported protocol in sub-response for report {}.{}",
-                        leader_input.time, leader_input.nonce
+                        "unsupported protocol in sub-response for report {}",
+                        leader_input.timestamp
                     )))
                 }
             };
 
-            let interval_start = leader_input.interval_start(self.parameters.min_batch_duration);
+            let interval_start = leader_input
+                .timestamp
+                .interval_start(self.parameters.min_batch_duration);
+
+            info!(
+                timestamp = ?leader_input.timestamp,
+                helper_verifier_message = ?helper_verifier_message,
+                leader_verifier_message = ?leader_input,
+                "verifying proof"
+            );
 
             let input_share =
                 match verify_finish(leader_input.leader_state, vec![helper_verifier_message]) {
                     Ok(input_share) => input_share,
                     Err(e) => {
-                        // If leader cannot verify the proof, then helper almost
-                        // certainly rejected this report, too, and so we can
-                        // just drop it from the aggregation.
+                        // This should never happen, because if the leader can't
+                        // verify the proof, then helper almost certainly
+                        // rejected the report, too, and so would have not
+                        // provided a verifier message.
+                        // We should perhaps specify that the helper should
+                        // provide a verifier share even if the proof was
+                        // invalid. The tradeoff here is between making the
+                        // leader do redundant proof verification and the
+                        // complexity of an optional field in a protocol
+                        // message.
                         let boxed_error: Box<dyn std::error::Error + 'static> = e.into();
                         warn!(
-                            time = leader_input.time,
-                            nonce = leader_input.nonce,
+                            time = ?leader_input.timestamp,
                             error = boxed_error.as_ref(),
                             "proof did not check out for report"
                         );
@@ -376,16 +386,204 @@ impl LeaderAggregator {
             // Proof checked out -- sum the input share into the accumulator for
             // the batch interval corresponding to the report timestamp.
             if let Some(sum) = self.accumulators.get_mut(&interval_start) {
-                merge_vector(&mut sum.0, input_share.as_slice())?;
-                sum.1 += 1;
+                merge_vector(&mut sum.accumulated, input_share.as_slice())?;
+                sum.contributions += 1;
             } else {
                 // This is the first input we have seen for this batch interval.
                 // Initialize the accumulator.
-                self.accumulators
-                    .insert(interval_start, (input_share.as_slice().to_vec(), 1));
+                self.accumulators.insert(
+                    interval_start,
+                    Accumulator {
+                        accumulated: input_share.as_slice().to_vec(),
+                        contributions: 1,
+                    },
+                );
             }
         }
 
+        self.helper_state = aggregate_response.helper_state;
+
+        dump_accumulators(&self.accumulators);
+
         Ok(())
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct HelperState {
+    accumulators: HashMap<DateTime<Utc>, Accumulator>,
+    last_timestamp_seen: Timestamp,
+}
+
+/// Implements endpoints for helper.
+#[derive(Debug)]
+pub struct HelperAggregator {
+    parameters: Parameters,
+    hpke_config: hpke::Config,
+    helper_state: HelperState,
+}
+
+impl HelperAggregator {
+    pub fn new(
+        parameters: &Parameters,
+        hpke_config: &hpke::Config,
+        state_blob: &[u8],
+    ) -> Result<Self, Error> {
+        // TODO(timg): encrypt helper state to protect it from leader and put
+        // some kind of anti-replay token in there
+        let helper_state: HelperState = if state_blob.is_empty() {
+            // Empty state
+            HelperState {
+                accumulators: HashMap::new(),
+                last_timestamp_seen: Timestamp { time: 0, nonce: 0 },
+            }
+        } else {
+            serde_json::from_slice(state_blob)?
+        };
+        Ok(Self {
+            parameters: parameters.clone(),
+            hpke_config: hpke_config.clone(),
+            helper_state,
+        })
+    }
+
+    pub fn handle_aggregate(
+        &mut self,
+        request: &AggregateRequest<Field64>,
+    ) -> Result<AggregateResponse<Field64>, Error> {
+        info!(
+            sub_request_count = request.sub_requests.len(),
+            "got aggregate request"
+        );
+
+        if request.task_id != self.parameters.task_id {
+            return Err(Error::UnknownTaskId(request.task_id));
+        }
+
+        let mut sub_responses = vec![];
+
+        for sub_request in &request.sub_requests {
+            if sub_request
+                .timestamp
+                .cmp(&self.helper_state.last_timestamp_seen)
+                != Ordering::Greater
+            {
+                warn!(
+                    request_timestamp = ?sub_request.timestamp,
+                    last_timestamp_seen = ?self.helper_state.last_timestamp_seen,
+                    "ignoring report whose timestamp is too old"
+                );
+                continue;
+            }
+
+            if sub_request.helper_share.aggregator_config_id != self.hpke_config.id {
+                // TODO(timg) construct problem document with type=outdatedConfig
+                // per section 3.1
+                return Err(Error::UnknownHpkeConfig(
+                    sub_request.helper_share.aggregator_config_id,
+                ));
+            }
+
+            // Decrypt and decode helper UploadMessage. We must create a new context
+            // for each message or the nonces won't line up with the sender.
+            let hpke_recipient = self.hpke_config.report_recipient(
+                &request.task_id,
+                Role::Helper,
+                &sub_request.helper_share.encapsulated_context,
+            )?;
+
+            let decrypted_input_share = hpke_recipient.decrypt_input_share(
+                &sub_request.helper_share,
+                &sub_request.timestamp.associated_data(),
+            )?;
+
+            let upload_message: UploadMessage<Field64> =
+                serde_json::from_slice(&decrypted_input_share)?;
+
+            // Construct helper verifier message
+            let (state, helper_verifier_message) = verify_start::<Field64, Boolean<Field64>>(
+                upload_message,
+                (),
+                Role::Helper.index() as u8,
+                &boolean_query_randomness(),
+            )?;
+
+            let leader_verifier_message = match &sub_request.protocol_parameters {
+                ProtocolAggregateSubRequestFields::Prio {
+                    leader_verifier_message: message,
+                } => message,
+                _ => {
+                    return Err(Error::AggregateProtocol(format!(
+                        "unsupported protocol in sub-response for report {}",
+                        sub_request.timestamp
+                    )))
+                }
+            };
+
+            info!(
+                timestamp = ?sub_request.timestamp,
+                leader_verifier_message = ?leader_verifier_message,
+                helper_verifier_message = ?state,
+                "verifying proof"
+            );
+
+            // Kinda unfortunate here that `verify_finish` consumes verifier
+            // shares:
+            // 1 - I need a reference to the verifier message so I can send it
+            //     back to leader
+            // 2 - Having Vec<VerifierMessage> instead of &[VerifierMessage]
+            //     forces allocation + copy to the heap
+            let helper_verifier_message =
+                match verify_finish(state, vec![leader_verifier_message.clone()]) {
+                    Ok(input_share) => {
+                        // Proof is OK. Accumulate this share and send helper
+                        // verifier share to leader so they can verify the proof
+                        // too.
+                        let interval_start = sub_request
+                            .timestamp
+                            .interval_start(self.parameters.min_batch_duration);
+                        if let Some(sum) = self.helper_state.accumulators.get_mut(&interval_start) {
+                            merge_vector(&mut sum.accumulated, input_share.as_slice())?;
+                            sum.contributions += 1;
+                        } else {
+                            // This is the first input we have seen for this batch interval.
+                            // Initialize the accumulator.
+                            self.helper_state.accumulators.insert(
+                                interval_start,
+                                Accumulator {
+                                    accumulated: input_share.as_slice().to_vec(),
+                                    contributions: 1,
+                                },
+                            );
+                        }
+                        Some(helper_verifier_message)
+                    }
+                    Err(e) => {
+                        let boxed_error: Box<dyn std::error::Error + 'static> = e.into();
+                        warn!(
+                            time = ?sub_request.timestamp,
+                            error = boxed_error.as_ref(),
+                            "proof did not check out for aggregate sub-request"
+                        );
+                        None
+                    }
+                };
+
+            sub_responses.push(AggregateSubResponse {
+                timestamp: sub_request.timestamp,
+                protocol_parameters: ProtocolAggregateSubResponseFields::Prio {
+                    helper_verifier_message,
+                },
+            });
+
+            self.helper_state.last_timestamp_seen = sub_request.timestamp;
+        }
+
+        dump_accumulators(&self.helper_state.accumulators);
+
+        Ok(AggregateResponse {
+            helper_state: serde_json::to_vec(&self.helper_state)?,
+            sub_responses,
+        })
     }
 }

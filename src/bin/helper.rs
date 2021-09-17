@@ -1,14 +1,14 @@
 use color_eyre::eyre::Result;
 use http::StatusCode;
 use ppm_prototype::{
-    aggregate::{AggregateRequest, AggregateResponse},
+    aggregate::{AggregateRequest, HelperAggregator},
     hpke::{self, Role},
     parameters::Parameters,
     trace,
 };
 use prio::field::Field64;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use tracing::info;
+use tracing::{error, info};
 use warp::{reply, Filter};
 
 #[tokio::main]
@@ -28,15 +28,25 @@ async fn main() -> Result<()> {
         .and(warp::path("aggregate"))
         .and(warp::body::json())
         .map(move |aggregate_request: AggregateRequest<Field64>| {
-            info!(
-                sub_request_count = aggregate_request.sub_requests.len(),
-                "got aggregate request"
-            );
-            let response: AggregateResponse<Field64> = AggregateResponse {
-                helper_state: vec![],
-                sub_responses: vec![],
+            let mut helper_aggregator = match HelperAggregator::new(
+                &ppm_parameters,
+                &hpke_config,
+                &aggregate_request.helper_state,
+            ) {
+                Ok(helper) => helper,
+                Err(e) => {
+                    error!(error = ?e, "failed to create helper aggregator with state");
+                    return reply::with_status(reply::json(&()), StatusCode::BAD_REQUEST);
+                }
             };
-            reply::with_status(reply::json(&response), StatusCode::OK)
+
+            match helper_aggregator.handle_aggregate(&aggregate_request) {
+                Ok(response) => reply::with_status(reply::json(&response), StatusCode::OK),
+                Err(e) => {
+                    error!(error = ?e, "failed to handle aggregate request");
+                    reply::with_status(reply::json(&()), StatusCode::INTERNAL_SERVER_ERROR)
+                }
+            }
         })
         .with(warp::trace::named("aggregate"));
 

@@ -13,7 +13,7 @@
     },
     "max_batch_lifetime": 1,
     "min_batch_size": 100,
-    "min_batch_duration": 100000,
+    "min_batch_duration": 50,
     "Prio": {
         "joint_rand": [[134, 97, 148, 108, 28, 17, 66, 206]],
         "field": "Field64",

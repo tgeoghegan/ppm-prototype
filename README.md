@@ -3,7 +3,7 @@
 A prototype implementation of the [Privacy Preserving Measurement][ppm-doc]
 protocol.
 
-[ppm-doc]: https://github.com/abetterinternet/prio-documents
+[ppm-doc]: https://github.com/abetterinternet/ppm-specification
 
 ## Config files
 
@@ -25,11 +25,20 @@ Run the leader thusly:
 The leader will listen for connections on `0.0.0.0` at the port specified in
 `parameters.json`. It will advertise the HPKE config in `hpke.json`.
 
+## Helper
+
+Run the helper thusly:
+
+    cargo run --bin helper
+
+The helper will listen for connections on `0.0.0.0` at the port specified in
+`parameters.json`. It will advertise the HPKE config in `hpke.json`.
+
 ## Client
 
 Run the client thusly:
 
     cargo run --bin client
 
-The client will generate a random report, encrypt it to the HPKE config
-advertised by the leader specified in `parameters.json` and upload it.
+The client will generate random reports, encrypt them to the HPKE config
+advertised by the leader specified in `parameters.json` and upload them.

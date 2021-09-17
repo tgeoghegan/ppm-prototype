@@ -5,6 +5,7 @@ use ppm_prototype::{
     parameters::{Parameters, PrioField, PrioType, ProtocolParameters},
     trace,
     upload::{EncryptedInputShare, Report},
+    Timestamp,
 };
 use prio::{field::Field64, pcp::types::Boolean, ppm::upload};
 use reqwest::Client;
@@ -28,9 +29,11 @@ async fn do_upload(
     // TODO(timg): I don't like partially constructing the Report and then
     // filling in `encrypted_input_shares` later. Maybe impl Default on Report.
     let mut report = Report {
+        timestamp: Timestamp {
+            time: 1631907512 + count,
+            nonce: rand::random(),
+        },
         task_id: ppm_parameters.task_id,
-        time: 2000 + count,
-        nonce: rand::random(),
         extensions: vec![],
         encrypted_input_shares: vec![],
     };
@@ -112,7 +115,7 @@ async fn main() -> Result<()> {
         .hpke_config(Role::Helper, &http_client)
         .await?;
 
-    for count in 0..200 {
+    for count in 0..10 {
         do_upload(
             count,
             &http_client,

@@ -1,4 +1,8 @@
-use crate::{config_path, parameters::TaskId, upload::Report};
+use crate::{
+    config_path,
+    parameters::TaskId,
+    upload::{EncryptedInputShare, Report},
+};
 use ::hpke::{
     aead::{Aead, AeadTag, AesGcm128, AesGcm256, ChaCha20Poly1305},
     kdf::{HkdfSha256, HkdfSha384, HkdfSha512, Kdf},
@@ -39,6 +43,8 @@ impl Role {
     /// Returns the index into protocol message vectors at which this role's
     /// entry can be found. e.g., the leader's input share in a `Report` is
     /// `Report.encrypted_input_shares[Role::Leader.role_index()]`.
+    // TODO this can probably return u8, if we assert that there cannot be more
+    // than 255 aggregators.
     pub fn index(self) -> usize {
         match self {
             Role::Leader => 0,
@@ -187,7 +193,7 @@ impl Config {
         &self,
         task_id: &TaskId,
         recipient_role: Role,
-        report: &Report,
+        encapsulated_context: &[u8],
     ) -> Result<Recipient<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>, Error> {
         // TODO(timg): as in sender(), figure out how to handle other specializations
         self.supported_configuration()?;
@@ -198,10 +204,9 @@ impl Config {
             .ok_or(Error::InvalidConfiguration("no private key"))?;
 
         Recipient::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
-            recipient_role,
             &Self::report_application_info(task_id, recipient_role),
             private_key,
-            &report.encrypted_input_shares[recipient_role.index()].encapsulated_context,
+            encapsulated_context,
         )
     }
 }
@@ -322,12 +327,10 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
 /// encapsulation algorithms.
 pub struct Recipient<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> {
     context: AeadCtxR<Encrypt, Derive, Encapsulate>,
-    role: Role,
 }
 
 impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, Encapsulate> {
     pub fn new(
-        role: Role,
         application_info: &[u8],
         serialized_recipient_private_key: &[u8],
         serialized_sender_encapsulated_key: &[u8],
@@ -350,7 +353,7 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
             application_info,
         )?;
 
-        Ok(Self { context, role })
+        Ok(Self { context })
     }
 
     /// Decrypt the input share from `report` for this `Recipient`'s server role
@@ -359,15 +362,19 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
     /// In PPM, an HPKE context can only be used once (we have no means of
     /// ensuring that sender and recipient "increment" nonces in lockstep), so
     /// this method consumes self.
-    pub fn decrypt_input_share(mut self, report: &Report) -> Result<Vec<u8>, Error> {
+    pub fn decrypt_input_share(
+        mut self,
+        encrypted_input_share: &EncryptedInputShare,
+        associated_data: &[u8],
+    ) -> Result<Vec<u8>, Error> {
         let tag_len = AeadTag::<Encrypt>::size();
-        let payload = &report.encrypted_input_shares[self.role.index()].payload;
+        let payload = &encrypted_input_share.payload;
 
         // This assumes that `EncryptedInputShare.payload` consists of
         // (ciphertext || tag). That's true for all AEADs currently supported by
         // HPKE but may not always be true.
         let (ciphertext, tag) = payload.split_at(payload.len() - tag_len);
-        self.open(ciphertext, &report.associated_data(), tag)
+        self.open(ciphertext, associated_data, tag)
     }
 
     fn open(
@@ -439,7 +446,6 @@ mod tests {
                 KeyDerivationFunction::HkdfSha256,
                 AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305,
             ) => Recipient::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
-                Role::Leader,
                 application_info,
                 &config.private_key.unwrap(),
                 &sender.encapped_key.to_bytes(),

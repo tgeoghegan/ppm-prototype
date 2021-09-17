@@ -1,6 +1,6 @@
 //! The upload portion of the PPM protocol, per §3.3 of RFCXXXX
 
-use crate::{parameters::TaskId, Time};
+use crate::{parameters::TaskId, Timestamp};
 use derivative::Derivative;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -18,8 +18,8 @@ pub enum Error {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct Report {
     pub task_id: TaskId,
-    pub time: Time,
-    pub nonce: u64,
+    #[serde(flatten)]
+    pub timestamp: Timestamp,
     pub extensions: Vec<ReportExtension>,
     pub encrypted_input_shares: Vec<EncryptedInputShare>,
 }
@@ -40,7 +40,7 @@ impl Report {
         // on the wire, but abide by TLS rules here.
         // https://datatracker.ietf.org/doc/html/rfc8446#section-3.1
         // TODO(timg) include upload extensions in AAD
-        [self.time.to_be_bytes(), self.nonce.to_be_bytes()].concat()
+        self.timestamp.associated_data()
     }
 }
 

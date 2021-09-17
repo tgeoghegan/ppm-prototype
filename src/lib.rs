@@ -5,14 +5,68 @@ pub mod parameters;
 pub mod trace;
 pub mod upload;
 
+use chrono::{DateTime, DurationRound, TimeZone, Utc};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    cmp::Ordering,
+    fmt::{self, Display, Formatter},
+    path::PathBuf,
+    sync::Arc,
+};
 use tokio::sync::Mutex;
 use warp::Filter;
 
 /// Seconds elapsed since start of UNIX epoch
 pub type Time = u64;
+
+/// Timestamp as included in a Report, AggregateSubReq, etc.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct Timestamp {
+    pub time: Time,
+    pub nonce: u64,
+}
+
+impl Ord for Timestamp {
+    fn cmp(&self, other: &Self) -> Ordering {
+        // Comparison per RFCXXXX §4.4.2
+        if other.time == self.time && other.nonce == self.nonce {
+            return Ordering::Equal;
+        }
+
+        if other.time > self.time || (other.time == self.time && other.nonce > self.nonce) {
+            return Ordering::Less;
+        }
+
+        Ordering::Greater
+    }
+}
+
+impl PartialOrd for Timestamp {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Display for Timestamp {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.time, self.nonce)
+    }
+}
+
+impl Timestamp {
+    /// Determine the start of the aggregation window that this report falls in,
+    /// assuming the provided minimum batch duration
+    pub(crate) fn interval_start(&self, min_batch_duration: Duration) -> DateTime<Utc> {
+        Utc.timestamp(self.time as i64, 0)
+            .duration_trunc(chrono::Duration::seconds(min_batch_duration as i64))
+            .unwrap()
+    }
+
+    pub(crate) fn associated_data(&self) -> Vec<u8> {
+        [self.time.to_be_bytes(), self.nonce.to_be_bytes()].concat()
+    }
+}
 
 /// Seconds elapsed between two instants
 pub type Duration = u64;

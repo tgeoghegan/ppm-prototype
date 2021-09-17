@@ -42,7 +42,7 @@ async fn main() -> Result<()> {
                 match leader_aggregator.lock().await.handle_upload(&report).await {
                     Ok(()) => Ok(reply::with_status(reply(), StatusCode::OK)),
                     Err(e) => {
-                        error!("{:?}", e);
+                        error!(error = ?e, "failed to handle upload");
                         // TODO wire up a type that implements Reject and attach
                         // a warp reject handler that constructs appropriate responses
                         Err(warp::reject::not_found())
