@@ -8,7 +8,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use prio::{
     field::{Field64, FieldElement},
-    ppm::VerifierMessage,
+    vdaf::{suite::Key, VerifierMessage},
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Debug};
@@ -17,8 +17,8 @@ use tracing::info;
 /// Returns a fixed vector of randomness to be used in Boolean<Field64> values,
 /// in anticipation of cjpatton working out how aggregators will negotiate
 /// query randomness.
-pub(crate) fn boolean_query_randomness() -> Vec<u8> {
-    vec![1; 32]
+pub(crate) fn boolean_query_randomness() -> Key {
+    Key::Aes128CtrHmacSha256([1; 32])
 }
 
 /// An aggregate request sent to a leader from a helper.
@@ -73,10 +73,7 @@ pub struct AggregateSubResponse<F: FieldElement> {
 pub enum ProtocolAggregateSubResponseFields<F: FieldElement> {
     /// Prio-specific parameters
     Prio {
-        /// If the helper was able to verify the proof using the leader's
-        /// verifier share, this will be the helper's verifier/proof share. If
-        /// the proof verification failed, this will be None.
-        helper_verifier_message: Option<VerifierMessage<F>>,
+        helper_verifier_message: VerifierMessage<F>,
     },
     Hits {},
 }

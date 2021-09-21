@@ -16,7 +16,10 @@ use http::StatusCode;
 use prio::{
     field::{merge_vector, Field64, FieldElement, FieldError},
     pcp::{types::Boolean, Value},
-    ppm::{verify_finish, verify_start, AggregatorState, PpmError, UploadMessage, VerifierMessage},
+    vdaf::{
+        suite::Suite, verify_finish, verify_start, AggregatorState, UploadMessage, VdafError,
+        VerifierMessage,
+    },
 };
 use reqwest::Client;
 use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
@@ -40,8 +43,8 @@ pub enum Error {
     UnknownTaskId(TaskId),
     #[error("unknown HPKE config ID {0}")]
     UnknownHpkeConfig(u8),
-    #[error("PPM error")]
-    Ppm(#[from] PpmError),
+    #[error("VDAF error")]
+    Vdaf(#[from] VdafError),
     #[error("HTTP client error")]
     HttpClient(#[from] reqwest::Error),
     #[error("Aggregate HTTP request error")]
@@ -144,6 +147,7 @@ impl Leader {
             serde_json::from_slice(&decrypted_input_share)?;
 
         let (state, verifier) = verify_start::<Field64, Boolean<Field64>>(
+            Suite::Aes128CtrHmacSha256,
             upload_message,
             (),
             Role::Leader.index() as u8,
@@ -248,16 +252,7 @@ impl Leader {
             let helper_verifier_message = match helper_response.protocol_parameters {
                 ProtocolAggregateSubResponseFields::Prio {
                     helper_verifier_message: message,
-                } => match message {
-                    Some(message) => message,
-                    None => {
-                        info!(
-                            time = ?leader_input.timestamp,
-                            "helper rejected proof for report"
-                        );
-                        continue;
-                    }
-                },
+                } => message,
                 _ => {
                     return Err(Error::AggregateProtocol(format!(
                         "unsupported protocol in sub-response for report {}",
@@ -277,29 +272,25 @@ impl Leader {
                 "verifying proof"
             );
 
-            let input_share =
-                match verify_finish(leader_input.leader_state, vec![helper_verifier_message]) {
-                    Ok(input_share) => input_share,
-                    Err(e) => {
-                        // This should never happen, because if the leader can't
-                        // verify the proof, then helper almost certainly
-                        // rejected the report, too, and so would have not
-                        // provided a verifier message.
-                        // We should perhaps specify that the helper should
-                        // provide a verifier share even if the proof was
-                        // invalid. The tradeoff here is between making the
-                        // leader do redundant proof verification and the
-                        // complexity of an optional field in a protocol
-                        // message.
-                        let boxed_error: Box<dyn std::error::Error + 'static> = e.into();
-                        warn!(
-                            time = ?leader_input.timestamp,
-                            error = boxed_error.as_ref(),
-                            "proof did not check out for report"
-                        );
-                        continue;
-                    }
-                };
+            let input_share = match verify_finish(
+                Suite::Aes128CtrHmacSha256,
+                leader_input.leader_state,
+                vec![
+                    helper_verifier_message,
+                    leader_input.leader_verifier_message,
+                ],
+            ) {
+                Ok(input_share) => input_share,
+                Err(e) => {
+                    let boxed_error: Box<dyn std::error::Error + 'static> = e.into();
+                    warn!(
+                        time = ?leader_input.timestamp,
+                        error = boxed_error.as_ref(),
+                        "proof did not check out for report"
+                    );
+                    continue;
+                }
+            };
 
             // Proof checked out -- sum the input share into the accumulator for
             // the batch interval corresponding to the report timestamp.

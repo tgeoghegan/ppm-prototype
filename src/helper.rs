@@ -15,7 +15,7 @@ use http::StatusCode;
 use prio::{
     field::{merge_vector, Field64, FieldError},
     pcp::{types::Boolean, Value},
-    ppm::{verify_finish, verify_start, PpmError, UploadMessage},
+    vdaf::{suite::Suite, verify_finish, verify_start, UploadMessage, VdafError},
 };
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
@@ -31,8 +31,8 @@ pub enum Error {
     UnknownTaskId(TaskId),
     #[error("unknown HPKE config ID {0}")]
     UnknownHpkeConfig(u8),
-    #[error("PPM error")]
-    Ppm(#[from] PpmError),
+    #[error("VDAF error")]
+    Vdaf(#[from] VdafError),
     #[error("HTTP client error")]
     HttpClient(#[from] reqwest::Error),
     #[error("Aggregate HTTP request error")]
@@ -138,6 +138,7 @@ impl Helper {
 
             // Construct helper verifier message
             let (state, helper_verifier_message) = verify_start::<Field64, Boolean<Field64>>(
+                Suite::Aes128CtrHmacSha256,
                 upload_message,
                 (),
                 Role::Helper.index() as u8,
@@ -167,41 +168,45 @@ impl Helper {
             // shares: taking Vec<VerifierMessage> instead of &[VerifierMessage]
             // forces allocation + copy to the heap, even if I own the value of
             // leader_verifier_message, and it's not clear that I do.
-            let helper_verifier_message =
-                match verify_finish(state, vec![leader_verifier_message.clone()]) {
-                    Ok(input_share) => {
-                        // Proof is OK. Accumulate this share and send helper
-                        // verifier share to leader so they can verify the proof
-                        // too.
-                        let interval_start = sub_request
-                            .timestamp
-                            .interval_start(self.parameters.min_batch_duration);
-                        if let Some(sum) = self.helper_state.accumulators.get_mut(&interval_start) {
-                            merge_vector(&mut sum.accumulated, input_share.as_slice())?;
-                            sum.contributions += 1;
-                        } else {
-                            // This is the first input we have seen for this batch interval.
-                            // Initialize the accumulator.
-                            self.helper_state.accumulators.insert(
-                                interval_start,
-                                Accumulator {
-                                    accumulated: input_share.as_slice().to_vec(),
-                                    contributions: 1,
-                                },
-                            );
-                        }
-                        Some(helper_verifier_message)
-                    }
-                    Err(e) => {
-                        let boxed_error: Box<dyn std::error::Error + 'static> = e.into();
-                        warn!(
-                            time = ?sub_request.timestamp,
-                            error = boxed_error.as_ref(),
-                            "proof did not check out for aggregate sub-request"
+            match verify_finish(
+                Suite::Aes128CtrHmacSha256,
+                state,
+                vec![
+                    leader_verifier_message.clone(),
+                    helper_verifier_message.clone(),
+                ],
+            ) {
+                Ok(input_share) => {
+                    // Proof is OK. Accumulate this share and send helper
+                    // verifier share to leader so they can verify the proof
+                    // too.
+                    let interval_start = sub_request
+                        .timestamp
+                        .interval_start(self.parameters.min_batch_duration);
+                    if let Some(sum) = self.helper_state.accumulators.get_mut(&interval_start) {
+                        merge_vector(&mut sum.accumulated, input_share.as_slice())?;
+                        sum.contributions += 1;
+                    } else {
+                        // This is the first input we have seen for this batch interval.
+                        // Initialize the accumulator.
+                        self.helper_state.accumulators.insert(
+                            interval_start,
+                            Accumulator {
+                                accumulated: input_share.as_slice().to_vec(),
+                                contributions: 1,
+                            },
                         );
-                        None
                     }
-                };
+                }
+                Err(e) => {
+                    let boxed_error: Box<dyn std::error::Error + 'static> = e.into();
+                    warn!(
+                        time = ?sub_request.timestamp,
+                        error = boxed_error.as_ref(),
+                        "proof did not check out for aggregate sub-request"
+                    );
+                }
+            }
 
             sub_responses.push(AggregateSubResponse {
                 timestamp: sub_request.timestamp,
