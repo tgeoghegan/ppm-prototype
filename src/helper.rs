@@ -2,7 +2,7 @@
 
 use crate::{
     aggregate::{
-        boolean_query_randomness, dump_accumulators, Accumulator, AggregateRequest,
+        boolean_initial_aggregator_state, dump_accumulators, Accumulator, AggregateRequest,
         AggregateResponse, AggregateSubResponse, ProtocolAggregateSubRequestFields,
         ProtocolAggregateSubResponseFields,
     },
@@ -15,7 +15,7 @@ use http::StatusCode;
 use prio::{
     field::{merge_vector, Field64, FieldError},
     pcp::{types::Boolean, Value},
-    vdaf::{suite::Suite, verify_finish, verify_start, UploadMessage, VdafError},
+    vdaf::{verify_finish, verify_start, InputShareMessage, VdafError},
 };
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
@@ -133,17 +133,14 @@ impl Helper {
                 &sub_request.timestamp.associated_data(),
             )?;
 
-            let upload_message: UploadMessage<Field64> =
+            let initial_state = boolean_initial_aggregator_state(Role::Helper);
+
+            let input_share_message: InputShareMessage<Field64> =
                 serde_json::from_slice(&decrypted_input_share)?;
 
             // Construct helper verifier message
-            let (state, helper_verifier_message) = verify_start::<Field64, Boolean<Field64>>(
-                Suite::Aes128CtrHmacSha256,
-                upload_message,
-                (),
-                Role::Helper.index() as u8,
-                &boolean_query_randomness(),
-            )?;
+            let (state, helper_verifier_message) =
+                verify_start::<Boolean<Field64>>(initial_state, input_share_message)?;
 
             let leader_verifier_message = match &sub_request.protocol_parameters {
                 ProtocolAggregateSubRequestFields::Prio {
@@ -169,9 +166,8 @@ impl Helper {
             // forces allocation + copy to the heap, even if I own the value of
             // leader_verifier_message, and it's not clear that I do.
             match verify_finish(
-                Suite::Aes128CtrHmacSha256,
                 state,
-                vec![
+                [
                     leader_verifier_message.clone(),
                     helper_verifier_message.clone(),
                 ],

@@ -8,7 +8,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use prio::{
     field::{Field64, FieldElement},
-    vdaf::{suite::Key, VerifierMessage},
+    pcp::types::Boolean,
+    vdaf::{suite::Key, AggregatorState, VerifierMessage},
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Debug};
@@ -17,8 +18,14 @@ use tracing::info;
 /// Returns a fixed vector of randomness to be used in Boolean<Field64> values,
 /// in anticipation of cjpatton working out how aggregators will negotiate
 /// query randomness.
-pub(crate) fn boolean_query_randomness() -> Key {
-    Key::Aes128CtrHmacSha256([1; 32])
+pub(crate) fn boolean_initial_aggregator_state(
+    role: crate::hpke::Role,
+) -> AggregatorState<Boolean<Field64>> {
+    AggregatorState::Ready {
+        aggregator_id: role.index() as u8,
+        input_param: (),
+        query_rand_seed: Key::Aes128CtrHmacSha256([1; 32]),
+    }
 }
 
 /// An aggregate request sent to a leader from a helper.

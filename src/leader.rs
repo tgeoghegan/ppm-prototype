@@ -2,7 +2,7 @@
 
 use crate::{
     aggregate::{
-        boolean_query_randomness, dump_accumulators, Accumulator, AggregateRequest,
+        boolean_initial_aggregator_state, dump_accumulators, Accumulator, AggregateRequest,
         AggregateResponse, AggregateSubRequest, ProtocolAggregateSubRequestFields,
         ProtocolAggregateSubResponseFields,
     },
@@ -17,8 +17,7 @@ use prio::{
     field::{merge_vector, Field64, FieldElement, FieldError},
     pcp::{types::Boolean, Value},
     vdaf::{
-        suite::Suite, verify_finish, verify_start, AggregatorState, UploadMessage, VdafError,
-        VerifierMessage,
+        verify_finish, verify_start, AggregatorState, InputShareMessage, VdafError, VerifierMessage,
     },
 };
 use reqwest::Client;
@@ -59,29 +58,29 @@ pub enum Error {
 
 /// In-memory representation of an input stored by the leader
 #[derive(Clone, Debug)]
-pub struct StoredInputShare<F: FieldElement, V: Value<F>> {
+pub struct StoredInputShare<F: FieldElement, V: Value<Field = F>> {
     pub timestamp: Timestamp,
-    pub leader_state: AggregatorState<F, V>,
+    pub leader_state: AggregatorState<V>,
     pub leader_verifier_message: VerifierMessage<F>,
     pub encrypted_helper_share: EncryptedInputShare,
     pub extensions: Vec<ReportExtension>,
 }
 
-impl<F: FieldElement, V: Value<F>> PartialEq for StoredInputShare<F, V> {
+impl<F: FieldElement, V: Value<Field = F>> PartialEq for StoredInputShare<F, V> {
     fn eq(&self, other: &Self) -> bool {
         self.timestamp.eq(&other.timestamp)
     }
 }
 
-impl<F: FieldElement, V: Value<F>> Eq for StoredInputShare<F, V> {}
+impl<F: FieldElement, V: Value<Field = F>> Eq for StoredInputShare<F, V> {}
 
-impl<F: FieldElement, V: Value<F>> Ord for StoredInputShare<F, V> {
+impl<F: FieldElement, V: Value<Field = F>> Ord for StoredInputShare<F, V> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.timestamp.cmp(&other.timestamp)
     }
 }
 
-impl<F: FieldElement, V: Value<F>> PartialOrd for StoredInputShare<F, V> {
+impl<F: FieldElement, V: Value<Field = F>> PartialOrd for StoredInputShare<F, V> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
@@ -143,16 +142,13 @@ impl Leader {
         let decrypted_input_share = hpke_recipient
             .decrypt_input_share(leader_share, &report.timestamp.associated_data())?;
 
-        let upload_message: UploadMessage<Field64> =
+        let leader_state = boolean_initial_aggregator_state(Role::Leader);
+
+        let input_share_message: InputShareMessage<Field64> =
             serde_json::from_slice(&decrypted_input_share)?;
 
-        let (state, verifier) = verify_start::<Field64, Boolean<Field64>>(
-            Suite::Aes128CtrHmacSha256,
-            upload_message,
-            (),
-            Role::Leader.index() as u8,
-            &boolean_query_randomness(),
-        )?;
+        let (state, verifier) =
+            verify_start::<Boolean<Field64>>(leader_state, input_share_message)?;
 
         self.unaggregated_inputs.push(StoredInputShare {
             timestamp: report.timestamp,
@@ -273,9 +269,8 @@ impl Leader {
             );
 
             let input_share = match verify_finish(
-                Suite::Aes128CtrHmacSha256,
                 leader_input.leader_state,
-                vec![
+                [
                     helper_verifier_message,
                     leader_input.leader_verifier_message,
                 ],

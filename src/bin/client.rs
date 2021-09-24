@@ -10,7 +10,7 @@ use ppm_prototype::{
 use prio::{
     field::Field64,
     pcp::types::Boolean,
-    vdaf::{suite::Suite, upload},
+    vdaf::{dist_input, suite::Suite},
 };
 use reqwest::Client;
 use tracing::info;
@@ -53,7 +53,7 @@ async fn do_upload(
     // Generate a Prio input and proof. The serialized format is input share
     // then proof share.
     let input: Boolean<Field64> = Boolean::new(true);
-    let upload_messages = upload(Suite::Aes128CtrHmacSha256, &input, 2)?;
+    let upload_messages = dist_input(Suite::Aes128CtrHmacSha256, &input, 2)?;
 
     // `Report.EncryptedInputShare.payload` is the encryption of a serialized
     // Prio `Upload[Message]`. Eventually we will implement serialization to
