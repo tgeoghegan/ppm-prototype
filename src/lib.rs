@@ -14,9 +14,7 @@ use std::{
     cmp::Ordering,
     fmt::{self, Display, Formatter},
     path::PathBuf,
-    sync::Arc,
 };
-use tokio::sync::Mutex;
 use warp::Filter;
 
 /// Seconds elapsed since start of UNIX epoch
@@ -86,6 +84,12 @@ pub struct Interval {
     pub start: Time,
     /// End of the interval, excluded.
     pub end: Time,
+}
+
+impl Interval {
+    pub(crate) fn associated_data(&self) -> Vec<u8> {
+        [self.start.to_be_bytes(), self.end.to_be_bytes()].concat()
+    }
 }
 
 /// Path relative to which configuration files may be found.

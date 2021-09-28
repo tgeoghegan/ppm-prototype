@@ -235,7 +235,7 @@ impl Config {
 
     /// Construct an HPKE recipient suitable for use by collector to decrypt
     /// `EncryptedOutputShare` structures sent by leader or helper
-    pub(crate) fn output_share_recipient(
+    pub fn output_share_recipient(
         &self,
         task_id: &TaskId,
         sender_role: Role,
@@ -357,12 +357,7 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
         batch_interval: Interval,
         plaintext: &[u8],
     ) -> Result<(Vec<u8>, EncappedKey<Encapsulate::Kex>), Error> {
-        let associated_data: Vec<u8> = [
-            batch_interval.start.to_be_bytes(),
-            batch_interval.end.to_be_bytes(),
-        ]
-        .concat();
-        let (ciphertext, tag) = self.seal(plaintext, &associated_data)?;
+        let (ciphertext, tag) = self.seal(plaintext, &batch_interval.associated_data())?;
         Ok((
             [&ciphertext, tag.to_bytes().as_slice()].concat(),
             self.encapped_key,
@@ -442,13 +437,13 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
     pub fn decrypt_output_share(
         mut self,
         encrypted_output_share: &EncryptedOutputShare,
-        associated_data: &[u8],
+        batch_interval: Interval,
     ) -> Result<Vec<u8>, Error> {
         let tag_len = AeadTag::<Encrypt>::size();
         let payload = &encrypted_output_share.payload;
 
         let (ciphertext, tag) = payload.split_at(payload.len() - tag_len);
-        self.open(ciphertext, associated_data, tag)
+        self.open(ciphertext, &batch_interval.associated_data(), tag)
     }
 
     fn open(

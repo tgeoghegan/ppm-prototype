@@ -1,5 +1,6 @@
 use ::hpke::Serializable;
 use color_eyre::eyre::{eyre, Result};
+use http::StatusCode;
 use ppm_prototype::{
     hpke::{self, Role},
     parameters::{Parameters, PrioField, PrioType, ProtocolParameters},
@@ -89,14 +90,18 @@ async fn do_upload(
         },
     ];
 
-    let upload_status = http_client
+    let status = http_client
         .post(ppm_parameters.upload_endpoint()?)
         .json(&report)
         .send()
         .await?
         .status();
-
-    info!(?upload_status, "upload complete");
+    if status != StatusCode::OK {
+        return Err(eyre!(
+            "unexpected HTTP status in upload request {:?}",
+            status
+        ));
+    }
 
     Ok(())
 }
@@ -129,6 +134,8 @@ async fn main() -> Result<()> {
         )
         .await?;
     }
+
+    info!("completed uploads");
 
     Ok(())
 }
