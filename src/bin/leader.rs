@@ -1,6 +1,7 @@
 use color_eyre::eyre::Result;
 use http::StatusCode;
 use ppm_prototype::{
+    collect::CollectRequest,
     hpke::{self, Role},
     leader::Leader,
     parameters::Parameters,
@@ -28,7 +29,7 @@ async fn main() -> Result<()> {
     let hpke_config = hpke::Config::from_config_file()?;
     let hpke_config_endpoint = hpke_config.warp_endpoint();
 
-    let leader_aggregator = Arc::new(Mutex::new(Leader::new(&ppm_parameters, &hpke_config)));
+    let leader_aggregator = Arc::new(Mutex::new(Leader::new(&ppm_parameters, &hpke_config)?));
 
     let upload = warp::post()
         .and(warp::path("upload"))
@@ -47,7 +48,24 @@ async fn main() -> Result<()> {
         })
         .with(warp::trace::named("upload"));
 
-    let routes = hpke_config_endpoint.or(upload).with(warp::trace::request());
+    let collect = warp::post()
+        .and(warp::path("collect"))
+        .and(warp::body::json())
+        .and(with_shared_value(leader_aggregator.clone()))
+        .and_then(
+            |collect_request: CollectRequest, leader: Arc<Mutex<Leader>>| async move {
+                match leader.lock().await.handle_collect(&collect_request).await {
+                    Ok(response) => Ok(reply::with_status(reply::json(&response), StatusCode::OK)),
+                    Err(_) => Err(warp::reject::not_found()),
+                }
+            },
+        )
+        .with(warp::trace::named("collect"));
+
+    let routes = hpke_config_endpoint
+        .or(upload)
+        .or(collect)
+        .with(warp::trace::request());
 
     info!("leader serving on 0.0.0.0:{}", port);
     warp::serve(routes)

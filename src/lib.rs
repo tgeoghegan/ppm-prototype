@@ -22,6 +22,20 @@ use warp::Filter;
 /// Seconds elapsed since start of UNIX epoch
 pub type Time = u64;
 
+pub trait IntervalStart {
+    fn interval_start(self, min_batch_duration: Duration) -> DateTime<Utc>;
+}
+
+impl IntervalStart for Time {
+    /// Determine the start of the aggregation window that this report falls in,
+    /// assuming the provided minimum batch duration
+    fn interval_start(self, min_batch_duration: Duration) -> DateTime<Utc> {
+        Utc.timestamp(self as i64, 0)
+            .duration_trunc(chrono::Duration::seconds(min_batch_duration as i64))
+            .unwrap()
+    }
+}
+
 /// Timestamp as included in a Report, AggregateSubReq, etc.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
 pub struct Timestamp {
@@ -57,14 +71,6 @@ impl Display for Timestamp {
 }
 
 impl Timestamp {
-    /// Determine the start of the aggregation window that this report falls in,
-    /// assuming the provided minimum batch duration
-    pub(crate) fn interval_start(&self, min_batch_duration: Duration) -> DateTime<Utc> {
-        Utc.timestamp(self.time as i64, 0)
-            .duration_trunc(chrono::Duration::seconds(min_batch_duration as i64))
-            .unwrap()
-    }
-
     pub(crate) fn associated_data(&self) -> Vec<u8> {
         [self.time.to_be_bytes(), self.nonce.to_be_bytes()].concat()
     }
@@ -74,7 +80,7 @@ impl Timestamp {
 pub type Duration = u64;
 
 /// Interval of time between two instants.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Interval {
     /// Start of the interval, included.
     pub start: Time,
@@ -90,8 +96,8 @@ pub(crate) fn config_path() -> PathBuf {
 
 // Injects a clone of the provided value into the warp filter, making it
 // available to the filter's map() or and_then() handler.
-pub fn with_shared_value<T: Sync + Send>(
-    value: Arc<Mutex<T>>,
-) -> impl Filter<Extract = (Arc<Mutex<T>>,), Error = std::convert::Infallible> + Clone {
+pub fn with_shared_value<T: Clone + Sync + Send>(
+    value: T,
+) -> impl Filter<Extract = (T,), Error = std::convert::Infallible> + Clone {
     warp::any().map(move || value.clone())
 }

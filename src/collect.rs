@@ -1,6 +1,7 @@
 //! The collect portion of the PPM protocol, per §4.4 of RFCXXXX
 
 use crate::{parameters::TaskId, Interval};
+use derivative::Derivative;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, thiserror::Error)]
@@ -34,12 +35,31 @@ pub struct CollectResponse {
     pub encrypted_output_shares: Vec<EncryptedOutputShare>,
 }
 
-/// An encrypted output share, sent from an aggregator to the collector
+/// Output share request from leader to helper
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+pub struct OutputShareRequest {
+    pub task_id: TaskId,
+    pub batch_interval: Interval,
+    pub helper_state: Vec<u8>,
+}
+
+/// An output share, sent from an aggregator to the collector
+// TODO this is a guess at what a Prio output share looks like
+#[derive(Clone, Debug, Derivative, PartialEq, Eq, Deserialize, Serialize)]
+pub struct OutputShare {
+    pub sum: Vec<u8>,
+    pub contributions: u64,
+}
+
+/// An encrypted output share, sent from an aggregator to the collector
+#[derive(Clone, Derivative, PartialEq, Eq, Deserialize, Serialize)]
+#[derivative(Debug)]
 pub struct EncryptedOutputShare {
     pub collector_hpke_config_id: u8,
     #[serde(rename = "enc")]
+    #[derivative(Debug = "ignore")]
     pub encapsulated_context: Vec<u8>,
     /// This is understood to be ciphertext || tag
-    pub encrypted_output_share: Vec<u8>,
+    #[derivative(Debug = "ignore")]
+    pub payload: Vec<u8>,
 }

@@ -6,14 +6,16 @@ use crate::{
         AggregateResponse, AggregateSubResponse, ProtocolAggregateSubRequestFields,
         ProtocolAggregateSubResponseFields,
     },
+    collect::{EncryptedOutputShare, OutputShare, OutputShareRequest},
     hpke::{self, Role},
     parameters::{Parameters, TaskId},
-    Timestamp,
+    IntervalStart, Timestamp,
 };
-use chrono::{DateTime, Utc};
+use ::hpke::Serializable;
+use chrono::{DateTime, TimeZone, Utc};
 use http::StatusCode;
 use prio::{
-    field::{merge_vector, Field64, FieldError},
+    field::{merge_vector, Field64, FieldElement, FieldError},
     pcp::{types::Boolean, Value},
     vdaf::{verify_finish, verify_start, InputShareMessage, VdafError},
 };
@@ -23,26 +25,28 @@ use tracing::{error, info, warn};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("JSON parse error")]
+    #[error("JSON parse error {0}")]
     JsonParse(#[from] serde_json::error::Error),
-    #[error("encryption error")]
+    #[error("encryption error {0}")]
     Encryption(#[from] crate::hpke::Error),
     #[error("unknown task ID")]
     UnknownTaskId(TaskId),
     #[error("unknown HPKE config ID {0}")]
     UnknownHpkeConfig(u8),
-    #[error("VDAF error")]
+    #[error("VDAF error {0}")]
     Vdaf(#[from] VdafError),
-    #[error("HTTP client error")]
+    #[error("HTTP client error {0}")]
     HttpClient(#[from] reqwest::Error),
     #[error("Aggregate HTTP request error")]
     AggregateRequest(StatusCode),
-    #[error("bad protocol parameters")]
+    #[error("bad protocol parameters {0}")]
     Parameters(#[from] crate::parameters::Error),
-    #[error("aggregate protocol error")]
+    #[error("aggregate protocol error {0}")]
     AggregateProtocol(String),
     #[error("field error")]
     PrioField(#[from] FieldError),
+    #[error("Insufficient contributions in interval described by collect request: {0}")]
+    InsufficientContributions(u64),
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -60,6 +64,7 @@ pub struct Helper {
 }
 
 impl Helper {
+    #[tracing::instrument(err, skip(hpke_config, state_blob))]
     pub fn new(
         parameters: &Parameters,
         hpke_config: &hpke::Config,
@@ -83,6 +88,7 @@ impl Helper {
         })
     }
 
+    #[tracing::instrument(skip(request, self), err)]
     pub fn handle_aggregate(
         &mut self,
         request: &AggregateRequest<Field64>,
@@ -178,6 +184,7 @@ impl Helper {
                     // too.
                     let interval_start = sub_request
                         .timestamp
+                        .time
                         .interval_start(self.parameters.min_batch_duration);
                     if let Some(sum) = self.helper_state.accumulators.get_mut(&interval_start) {
                         merge_vector(&mut sum.accumulated, input_share.as_slice())?;
@@ -190,6 +197,7 @@ impl Helper {
                             Accumulator {
                                 accumulated: input_share.as_slice().to_vec(),
                                 contributions: 1,
+                                privacy_budget: 0,
                             },
                         );
                     }
@@ -219,6 +227,97 @@ impl Helper {
         Ok(AggregateResponse {
             helper_state: serde_json::to_vec(&self.helper_state)?,
             sub_responses,
+        })
+    }
+
+    #[tracing::instrument(skip(self, output_share_request), err)]
+    pub fn handle_output_share(
+        &mut self,
+        output_share_request: &OutputShareRequest,
+    ) -> Result<EncryptedOutputShare, Error> {
+        if !self
+            .parameters
+            .validate_batch_interval(output_share_request.batch_interval)
+        {
+            return Err(Error::AggregateProtocol(
+                "invalid batch interval in request".to_string(),
+            ));
+        }
+
+        let num_intervals_in_request = (output_share_request.batch_interval.end
+            - output_share_request.batch_interval.start)
+            / self.parameters.min_batch_duration;
+        info!(?num_intervals_in_request, ?output_share_request.batch_interval, self.parameters.min_batch_duration);
+
+        if num_intervals_in_request == 0 {
+            // TODO Is this an error or do we send an empty EncryptedOutputShare?
+            return Err(Error::AggregateProtocol(
+                "batch interval is 0 length".to_string(),
+            ));
+        }
+
+        let first_interval = output_share_request
+            .batch_interval
+            .start
+            .interval_start(self.parameters.min_batch_duration);
+
+        let mut output_sum: Option<Vec<Field64>> = None;
+        let mut total_contributions = 0;
+
+        for i in 0..num_intervals_in_request {
+            let interval_start = Utc.timestamp(
+                first_interval.timestamp() + (i * self.parameters.min_batch_duration) as i64,
+                0,
+            );
+            info!(?interval_start);
+            match self.helper_state.accumulators.get_mut(&interval_start) {
+                Some(accumulator) => {
+                    match output_sum {
+                        Some(ref mut inner_output_sum) => {
+                            // merge in subsequent accumulators
+                            merge_vector(inner_output_sum, &accumulator.accumulated)?;
+                        }
+                        // Initialize output sum with first non-empty accumulator
+                        None => output_sum = Some(accumulator.accumulated.clone()),
+                    }
+
+                    accumulator.privacy_budget += 1;
+                    total_contributions += accumulator.contributions;
+                }
+                None => {
+                    // Most likely there are no contributions for this batch interval yet
+                    warn!(
+                        "no accumulator found for interval start {:?}",
+                        interval_start
+                    );
+                    continue;
+                }
+            };
+        }
+
+        if total_contributions < self.parameters.min_batch_size {
+            return Err(Error::InsufficientContributions(total_contributions));
+        }
+
+        let output_share = OutputShare {
+            sum: Field64::slice_into_byte_vec(&output_sum.unwrap()),
+            contributions: total_contributions,
+        };
+
+        let json_output_share = serde_json::to_vec(&output_share)?;
+
+        let hpke_sender = self
+            .parameters
+            .collector_config
+            .output_share_sender(&self.parameters.task_id, Role::Helper)?;
+
+        let (payload, encapped) = hpke_sender
+            .encrypt_output_share(output_share_request.batch_interval, &json_output_share)?;
+
+        Ok(EncryptedOutputShare {
+            collector_hpke_config_id: self.parameters.collector_config.id,
+            encapsulated_context: encapped.to_bytes().to_vec(),
+            payload,
         })
     }
 }

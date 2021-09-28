@@ -6,12 +6,16 @@ use crate::{
         AggregateResponse, AggregateSubRequest, ProtocolAggregateSubRequestFields,
         ProtocolAggregateSubResponseFields,
     },
+    collect::{
+        CollectRequest, CollectResponse, EncryptedOutputShare, OutputShare, OutputShareRequest,
+    },
     hpke::{self, Role},
     parameters::{Parameters, TaskId},
     upload::{EncryptedInputShare, Report, ReportExtension},
-    Timestamp,
+    IntervalStart, Timestamp,
 };
-use chrono::{DateTime, Utc};
+use ::hpke::Serializable;
+use chrono::{DateTime, TimeZone, Utc};
 use http::StatusCode;
 use prio::{
     field::{merge_vector, Field64, FieldElement, FieldError},
@@ -46,14 +50,20 @@ pub enum Error {
     Vdaf(#[from] VdafError),
     #[error("HTTP client error")]
     HttpClient(#[from] reqwest::Error),
-    #[error("Aggregate HTTP request error")]
+    #[error("Aggregate HTTP request error {0}")]
     AggregateRequest(StatusCode),
     #[error("bad protocol parameters")]
     Parameters(#[from] crate::parameters::Error),
-    #[error("aggregate protocol error")]
+    #[error("aggregate protocol error {0}")]
     AggregateProtocol(String),
     #[error("field error")]
     PrioField(#[from] FieldError),
+    #[error("Collect HTTP request error {0}")]
+    CollectRequest(StatusCode),
+    #[error("collect protocol error {0}")]
+    CollectProtocol(String),
+    #[error("Insufficient contributions in interval described by collect request: {0}")]
+    InsufficientContributions(u64),
 }
 
 /// In-memory representation of an input stored by the leader
@@ -103,19 +113,22 @@ pub struct Leader {
     /// the helper. The key is the start of the batch window.
     accumulators: HashMap<DateTime<Utc>, Accumulator>,
     helper_state: Vec<u8>,
+    http_client: Client,
 }
 
 impl Leader {
-    pub fn new(parameters: &Parameters, hpke_config: &hpke::Config) -> Self {
-        Self {
+    pub fn new(parameters: &Parameters, hpke_config: &hpke::Config) -> Result<Self, Error> {
+        Ok(Self {
             parameters: parameters.clone(),
             hpke_config: hpke_config.clone(),
             unaggregated_inputs: vec![],
             accumulators: HashMap::new(),
             helper_state: vec![],
-        }
+            http_client: Client::builder().user_agent(LEADER_USER_AGENT).build()?,
+        })
     }
 
+    #[tracing::instrument(skip(self, report), err)]
     pub async fn handle_upload(&mut self, report: &Report) -> Result<(), Error> {
         if report.task_id != self.parameters.task_id {
             // TODO(timg) construct problem document with type=unrecognizedTask
@@ -183,6 +196,7 @@ impl Leader {
         Ok(())
     }
 
+    #[tracing::instrument(err, skip(self))]
     async fn send_aggregate_request(&mut self) -> Result<(), Error> {
         let aggregate_sub_requests: Vec<AggregateSubRequest<Field64>> = self
             .unaggregated_inputs
@@ -203,9 +217,8 @@ impl Leader {
             sub_requests: aggregate_sub_requests,
         };
 
-        let http_client = Client::builder().user_agent(LEADER_USER_AGENT).build()?;
-
-        let http_response = http_client
+        let http_response = self
+            .http_client
             .post(self.parameters.aggregate_endpoint()?)
             .json(&aggregate_request)
             .send()
@@ -259,6 +272,7 @@ impl Leader {
 
             let interval_start = leader_input
                 .timestamp
+                .time
                 .interval_start(self.parameters.min_batch_duration);
 
             info!(
@@ -300,6 +314,7 @@ impl Leader {
                     Accumulator {
                         accumulated: input_share.as_slice().to_vec(),
                         contributions: 1,
+                        privacy_budget: 0,
                     },
                 );
             }
@@ -310,5 +325,117 @@ impl Leader {
         dump_accumulators(&self.accumulators);
 
         Ok(())
+    }
+
+    #[tracing::instrument(skip(self, collect_request), err)]
+    pub async fn handle_collect(
+        &mut self,
+        collect_request: &CollectRequest,
+    ) -> Result<CollectResponse, Error> {
+        if !self
+            .parameters
+            .validate_batch_interval(collect_request.batch_interval)
+        {
+            return Err(Error::CollectProtocol(
+                "invalid batch interval in request".to_string(),
+            ));
+        }
+
+        let num_intervals_in_request = (collect_request.batch_interval.end
+            - collect_request.batch_interval.start)
+            / self.parameters.min_batch_duration;
+
+        if num_intervals_in_request == 0 {
+            // TODO Is this an error or do we send an empty EncryptedOutputShare?
+            return Err(Error::CollectProtocol(
+                "batch interval is 0 length".to_string(),
+            ));
+        }
+
+        let output_share_request = OutputShareRequest {
+            task_id: collect_request.task_id,
+            batch_interval: collect_request.batch_interval,
+            helper_state: self.helper_state.clone(),
+        };
+
+        let http_response = self
+            .http_client
+            .post(self.parameters.output_share_endpoint()?)
+            .json(&output_share_request)
+            .send()
+            .await?;
+
+        if !http_response.status().is_success() {
+            return Err(Error::CollectRequest(http_response.status()));
+        }
+
+        let helper_encrypted_output_share: EncryptedOutputShare = http_response.json().await?;
+
+        let first_interval = collect_request
+            .batch_interval
+            .start
+            .interval_start(self.parameters.min_batch_duration);
+
+        let mut output_sum: Option<Vec<Field64>> = None;
+        let mut total_contributions = 0;
+
+        for i in 0..num_intervals_in_request {
+            let interval_start = Utc.timestamp(
+                first_interval.timestamp() + (i * self.parameters.min_batch_duration) as i64,
+                0,
+            );
+            match self.accumulators.get_mut(&interval_start) {
+                Some(accumulator) => {
+                    match output_sum {
+                        Some(ref mut inner_output_sum) => {
+                            // merge in subsequent accumulators
+                            merge_vector(inner_output_sum, &accumulator.accumulated)?;
+                        }
+                        // Initialize output sum with first non-empty accumulator
+                        None => output_sum = Some(accumulator.accumulated.clone()),
+                    }
+
+                    accumulator.privacy_budget += 1;
+                    total_contributions += accumulator.contributions;
+                }
+                None => {
+                    // Most likely there are no contributions for this batch interval yet
+                    warn!(
+                        "no accumulator found for interval start {:?}",
+                        interval_start
+                    );
+                    continue;
+                }
+            };
+        }
+
+        if total_contributions < self.parameters.min_batch_size {
+            return Err(Error::InsufficientContributions(total_contributions));
+        }
+
+        let output_share = OutputShare {
+            sum: Field64::slice_into_byte_vec(&output_sum.unwrap()),
+            contributions: total_contributions,
+        };
+
+        let json_output_share = serde_json::to_vec(&output_share)?;
+
+        let hpke_sender = self
+            .parameters
+            .collector_config
+            .output_share_sender(&self.parameters.task_id, Role::Leader)?;
+
+        let (payload, encapped) = hpke_sender
+            .encrypt_output_share(output_share_request.batch_interval, &json_output_share)?;
+
+        let leader_output_share = EncryptedOutputShare {
+            collector_hpke_config_id: self.parameters.collector_config.id,
+            encapsulated_context: encapped.to_bytes().to_vec(),
+            payload,
+        };
+
+        Ok(CollectResponse {
+            encrypted_output_shares: vec![leader_output_share, helper_encrypted_output_share],
+        })
     }
 }

@@ -91,7 +91,10 @@ pub(crate) struct Accumulator {
     /// The value accumulated thus far
     pub(crate) accumulated: Vec<Field64>,
     /// How many contributions are included
-    pub(crate) contributions: usize,
+    pub(crate) contributions: u64,
+    /// Privacy budget for the aggregation interval. Measured in number of
+    /// queries.
+    pub(crate) privacy_budget: u64,
 }
 
 pub(crate) fn dump_accumulators(accumulators: &HashMap<DateTime<Utc>, Accumulator>) {

@@ -27,7 +27,10 @@ async fn main() -> Result<()> {
 
     let collect_request = CollectRequest {
         task_id: ppm_parameters.task_id,
-        batch_interval: Interval { start: 10, end: 20 },
+        batch_interval: Interval {
+            start: 1631907500,
+            end: 1631907500 + 100,
+        },
         protocol_parameters: ProtocolCollectFields::Prio {},
     };
 
@@ -38,8 +41,9 @@ async fn main() -> Result<()> {
         .await?;
 
     let status = collect_response.status();
+    info!(http_status = ?status, "collect request HTTP status");
     if !status.is_success() {
-        return Err(eyre!("upload failed"));
+        return Err(eyre!("collect request failed"));
     }
 
     let collect_response_body: CollectResponse = collect_response.json().await?;

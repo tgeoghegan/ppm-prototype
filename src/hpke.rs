@@ -1,7 +1,9 @@
 use crate::{
+    collect::EncryptedOutputShare,
     config_path,
     parameters::TaskId,
     upload::{EncryptedInputShare, Report},
+    Interval,
 };
 use ::hpke::{
     aead::{Aead, AeadTag, AesGcm128, AesGcm256, ChaCha20Poly1305},
@@ -170,6 +172,12 @@ impl Config {
         .concat()
     }
 
+    /// Construct an application info string suitable for constructing HPKE
+    /// contexts for sealing or opening PPM output shares
+    fn output_share_application_info(task_id: &TaskId, sender_role: Role) -> Vec<u8> {
+        ["pda output share".as_bytes(), task_id, &[sender_role as u8]].concat()
+    }
+
     /// Construct an HPKE Sender suitable for encrypting `EncryptedInputShare`
     /// structures for inclusion in a PPM `Report`.
     pub fn report_sender(
@@ -205,6 +213,43 @@ impl Config {
 
         Recipient::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
             &Self::report_application_info(task_id, recipient_role),
+            private_key,
+            encapsulated_context,
+        )
+    }
+
+    /// Construct an HPKE sender suitable for use by leader or helper to encrypt
+    /// `EncryptedOutputShare` structures to collector
+    pub(crate) fn output_share_sender(
+        &self,
+        task_id: &TaskId,
+        sender_role: Role,
+    ) -> Result<Sender<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>, Error> {
+        self.supported_configuration()?;
+
+        Sender::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
+            &Self::output_share_application_info(task_id, sender_role),
+            &self.public_key,
+        )
+    }
+
+    /// Construct an HPKE recipient suitable for use by collector to decrypt
+    /// `EncryptedOutputShare` structures sent by leader or helper
+    pub(crate) fn output_share_recipient(
+        &self,
+        task_id: &TaskId,
+        sender_role: Role,
+        encapsulated_context: &[u8],
+    ) -> Result<Recipient<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>, Error> {
+        self.supported_configuration()?;
+
+        let private_key = self
+            .private_key
+            .as_ref()
+            .ok_or(Error::InvalidConfiguration("no private key"))?;
+
+        Recipient::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
+            &Self::output_share_application_info(task_id, sender_role),
             private_key,
             encapsulated_context,
         )
@@ -307,6 +352,23 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
         ))
     }
 
+    pub fn encrypt_output_share(
+        mut self,
+        batch_interval: Interval,
+        plaintext: &[u8],
+    ) -> Result<(Vec<u8>, EncappedKey<Encapsulate::Kex>), Error> {
+        let associated_data: Vec<u8> = [
+            batch_interval.start.to_be_bytes(),
+            batch_interval.end.to_be_bytes(),
+        ]
+        .concat();
+        let (ciphertext, tag) = self.seal(plaintext, &associated_data)?;
+        Ok((
+            [&ciphertext, tag.to_bytes().as_slice()].concat(),
+            self.encapped_key,
+        ))
+    }
+
     fn seal(
         &mut self,
         plaintext: &[u8],
@@ -373,6 +435,18 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
         // This assumes that `EncryptedInputShare.payload` consists of
         // (ciphertext || tag). That's true for all AEADs currently supported by
         // HPKE but may not always be true.
+        let (ciphertext, tag) = payload.split_at(payload.len() - tag_len);
+        self.open(ciphertext, associated_data, tag)
+    }
+
+    pub fn decrypt_output_share(
+        mut self,
+        encrypted_output_share: &EncryptedOutputShare,
+        associated_data: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        let tag_len = AeadTag::<Encrypt>::size();
+        let payload = &encrypted_output_share.payload;
+
         let (ciphertext, tag) = payload.split_at(payload.len() - tag_len);
         self.open(ciphertext, associated_data, tag)
     }

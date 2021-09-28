@@ -6,8 +6,9 @@
 use crate::{
     config_path,
     hpke::{self, Role},
-    Duration,
+    Duration, Interval, IntervalStart,
 };
+use chrono::{TimeZone, Utc};
 use rand::{thread_rng, Rng};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -102,6 +103,15 @@ impl Parameters {
         Ok(self
             .aggregator_endpoint(Role::Helper)
             .join("output_share")?)
+    }
+
+    /// Returns true if the batch interval is aligned with the minimum batch
+    /// duration
+    pub(crate) fn validate_batch_interval(&self, batch_interval: Interval) -> bool {
+        batch_interval.start.interval_start(self.min_batch_duration)
+            == Utc.timestamp(batch_interval.start as i64, 0)
+            && batch_interval.end.interval_start(self.min_batch_duration)
+                == Utc.timestamp(batch_interval.end as i64, 0)
     }
 }
 

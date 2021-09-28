@@ -34,7 +34,7 @@ async fn do_upload(
     // filling in `encrypted_input_shares` later. Maybe impl Default on Report.
     let mut report = Report {
         timestamp: Timestamp {
-            time: 1631907512 + count,
+            time: 1631907500 + count,
             nonce: rand::random(),
         },
         task_id: ppm_parameters.task_id,
@@ -79,12 +79,12 @@ async fn do_upload(
     report.encrypted_input_shares = vec![
         EncryptedInputShare {
             aggregator_config_id: leader_hpke_config.id,
-            encapsulated_context: leader_encapped_key.to_bytes().as_slice().to_vec(),
+            encapsulated_context: leader_encapped_key.to_bytes().to_vec(),
             payload: leader_payload,
         },
         EncryptedInputShare {
             aggregator_config_id: helper_hpke_config.id,
-            encapsulated_context: helper_encapped_key.to_bytes().as_slice().to_vec(),
+            encapsulated_context: helper_encapped_key.to_bytes().to_vec(),
             payload: helper_payload,
         },
     ];
@@ -119,7 +119,7 @@ async fn main() -> Result<()> {
         .hpke_config(Role::Helper, &http_client)
         .await?;
 
-    for count in 0..10 {
+    for count in 0..100 {
         do_upload(
             count,
             &http_client,
