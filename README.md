@@ -36,9 +36,19 @@ The helper will listen for connections on `0.0.0.0` at the port specified in
 
 ## Client
 
-Run the client thusly:
+Once the leader and helper are running, run the client thusly:
 
     cargo run --bin client
 
 The client will generate random reports, encrypt them to the HPKE config
-advertised by the leader specified in `parameters.json` and upload them.
+advertised by the leader specified in `parameters.json` and upload them. The
+leader and helper will execute the aggregate protocol together.
+
+## Collector
+
+After the client uploads inputs, run the collector thusly:
+
+    cargo run --bin collector
+
+The helper and leader will execute the collect protocol together and transmit
+output shares to the collector, reassembling them into an aggregate.
