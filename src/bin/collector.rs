@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     let http_client = Client::builder().user_agent(COLLECTOR_USER_AGENT).build()?;
 
     let ppm_parameters = Parameters::from_config_file()?;
-    let hpke_config = hpke::Config::from_config_file()?;
+    let hpke_config = hpke::Config::from_config_file(Role::Collector)?;
 
     let batch_interval = Interval {
         start: 1631907500,

@@ -7,7 +7,7 @@ use crate::{
 };
 use chrono::{DateTime, Utc};
 use prio::{
-    field::{Field64, FieldElement},
+    field::Field64,
     pcp::types::Boolean,
     vdaf::{suite::Key, AggregatorState, VerifierMessage},
 };
@@ -30,7 +30,7 @@ pub(crate) fn boolean_initial_aggregator_state(
 
 /// An aggregate request sent to a leader from a helper.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AggregateRequest<F: FieldElement> {
+pub struct AggregateRequest<F> {
     pub task_id: TaskId,
     pub helper_state: Vec<u8>,
     #[serde(rename = "seq")]
@@ -39,7 +39,7 @@ pub struct AggregateRequest<F: FieldElement> {
 
 /// Sub-request in an aggregate request
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AggregateSubRequest<F: FieldElement> {
+pub struct AggregateSubRequest<F> {
     #[serde(flatten)]
     pub timestamp: Timestamp,
     pub extensions: Vec<ReportExtension>,
@@ -50,7 +50,7 @@ pub struct AggregateSubRequest<F: FieldElement> {
 
 /// The protocol specific portions of AggregateSubRequest
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum ProtocolAggregateSubRequestFields<F: FieldElement> {
+pub enum ProtocolAggregateSubRequestFields<F> {
     /// Prio-specific parameters
     Prio {
         /// Message containing the leader's proof/verifier share.
@@ -61,14 +61,14 @@ pub enum ProtocolAggregateSubRequestFields<F: FieldElement> {
 
 /// The response to an aggregation request
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AggregateResponse<F: FieldElement> {
+pub struct AggregateResponse<F> {
     pub helper_state: Vec<u8>,
     pub sub_responses: Vec<AggregateSubResponse<F>>,
 }
 
 /// Sub-response in an aggregation response
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AggregateSubResponse<F: FieldElement> {
+pub struct AggregateSubResponse<F> {
     #[serde(flatten)]
     pub timestamp: Timestamp,
     #[serde(flatten)]
@@ -77,7 +77,7 @@ pub struct AggregateSubResponse<F: FieldElement> {
 
 /// The protocol specific portions of AggregateSubResponse
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum ProtocolAggregateSubResponseFields<F: FieldElement> {
+pub enum ProtocolAggregateSubResponseFields<F> {
     /// Prio-specific parameters
     Prio {
         helper_verifier_message: VerifierMessage<F>,

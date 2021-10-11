@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
         .port()
         .unwrap_or(80);
 
-    let hpke_config = hpke::Config::from_config_file()?;
+    let hpke_config = hpke::Config::from_config_file(Role::Helper)?;
     let hpke_config_endpoint = hpke_config.warp_endpoint();
 
     let aggregate = warp::post()

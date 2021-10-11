@@ -1143,6 +1143,7 @@ dependencies = [
 name = "ppm-prototype"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "color-eyre",
  "derivative",

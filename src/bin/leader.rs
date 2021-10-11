@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
     let port = ppm_parameters.aggregator_urls[Role::Leader.index()]
         .port()
         .unwrap_or(80);
-    let hpke_config = hpke::Config::from_config_file()?;
+    let hpke_config = hpke::Config::from_config_file(Role::Leader)?;
     let hpke_config_endpoint = hpke_config.warp_endpoint();
 
     let leader_aggregator = Arc::new(Mutex::new(Leader::new(&ppm_parameters, &hpke_config)?));

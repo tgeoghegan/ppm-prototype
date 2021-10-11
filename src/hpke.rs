@@ -37,22 +37,30 @@ pub enum Error {
 #[derive(Copy, Clone, Debug, Serialize_repr, Deserialize_repr, Eq, PartialEq)]
 #[repr(u8)]
 pub enum Role {
-    Leader = 0x01,
-    Helper = 0x00,
+    Leader = 0x00,
+    Helper = 0x01,
+    Collector = 0x02,
 }
 
 impl Role {
     /// Returns the index into protocol message vectors at which this role's
     /// entry can be found. e.g., the leader's input share in a `Report` is
     /// `Report.encrypted_input_shares[Role::Leader.role_index()]`.
-    // TODO this can probably return u8, if we assert that there cannot be more
-    // than 255 aggregators.
     pub fn index(self) -> usize {
         match self {
             Role::Leader => 0,
             Role::Helper => 1,
+            Role::Collector => 2,
         }
     }
+}
+
+/// Configuration file containing multiple HPKE configs
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct ConfigFile {
+    helper: Config,
+    leader: Config,
+    collector: Config,
 }
 
 /// HPKE configuration for a PPM participant, corresponding to `struct
@@ -68,22 +76,37 @@ pub struct Config {
     pub(crate) aead_id: AuthenticatedEncryptionWithAssociatedData,
     /// The public key, serialized using the `SerializePublicKey` function as
     /// described in draft-irtf-cfrg-hpke-11, §4 and §7.1.1.
+    #[serde(
+        serialize_with = "base64::serialize_bytes",
+        deserialize_with = "base64::deserialize_bytes"
+    )]
     pub(crate) public_key: Vec<u8>,
     /// The private key, serialized using the `SerializePrivateKey` function as
     /// described in draft-irtf-cfrg-hpke-11, §4 and §7.1.2. This value will not
     /// be present when advertised by a server from hpke_config.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "base64::serialize_bytes_option",
+        deserialize_with = "base64::deserialize_bytes_option"
+    )]
     pub(crate) private_key: Option<Vec<u8>>,
 }
 
 impl Config {
     /// Load HPKE config from JSON
-    pub fn from_config_file() -> Result<Self, Error> {
+    pub fn from_config_file(role: Role) -> Result<Self, Error> {
         let hpke_config_path = config_path().join("hpke.json");
-
-        Ok(serde_json::from_reader(
+        let config_file: ConfigFile = serde_json::from_reader(
             File::open(&hpke_config_path).map_err(|e| Error::File(e, hpke_config_path))?,
-        )?)
+        )?;
+
+        let config = match role {
+            Role::Helper => config_file.helper,
+            Role::Leader => config_file.leader,
+            Role::Collector => config_file.collector,
+        };
+
+        Ok(config)
     }
 
     /// Generate a new keypair for the requested algorithm and construct a
@@ -253,6 +276,37 @@ impl Config {
             private_key,
             encapsulated_context,
         )
+    }
+}
+
+mod base64 {
+    //! Custom serialization module used to serialize TaskId to base64
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize_bytes<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
+        String::serialize(&base64::encode(v), s)
+    }
+
+    pub fn deserialize_bytes<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+        base64::decode(String::deserialize(d)?.as_bytes()).map_err(Error::custom)
+    }
+
+    pub fn serialize_bytes_option<S: Serializer>(
+        v: &Option<Vec<u8>>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(v) => String::serialize(&base64::encode(v), s),
+            None => <Option<Vec<u8>>>::serialize(&None, s),
+        }
+    }
+
+    pub fn deserialize_bytes_option<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        Ok(Some(
+            base64::decode(String::deserialize(d)?.as_bytes()).map_err(Error::custom)?,
+        ))
     }
 }
 

@@ -32,6 +32,10 @@ pub enum Error {
 /// `struct Param` in §4.1 of RFCXXXX.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Parameters {
+    #[serde(
+        serialize_with = "base64::serialize_taskid",
+        deserialize_with = "base64::deserialize_taskid"
+    )]
     pub task_id: TaskId,
     pub aggregator_urls: Vec<Url>,
     pub collector_config: hpke::Config,
@@ -123,6 +127,24 @@ pub fn new_task_id() -> TaskId {
     thread_rng().gen::<[u8; 32]>()
 }
 
+mod base64 {
+    //! Custom serialization module used to serialize TaskId to base64
+    use super::TaskId;
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+    use std::convert::TryInto;
+
+    pub fn serialize_taskid<S: Serializer>(v: &TaskId, s: S) -> Result<S::Ok, S::Error> {
+        String::serialize(&base64::encode(v), s)
+    }
+
+    pub fn deserialize_taskid<'de, D: Deserializer<'de>>(d: D) -> Result<TaskId, D::Error> {
+        base64::decode(String::deserialize(d)?.as_bytes())
+            .map_err(Error::custom)?
+            .try_into()
+            .map_err(|_| Error::custom("can't convert vec into TaskId"))
+    }
+}
+
 /// The protocol specific portions of Parameters
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub enum ProtocolParameters {
@@ -155,23 +177,58 @@ pub enum PrioType {
 
 #[cfg(test)]
 mod tests {
+    use std::convert::TryInto;
+
     use super::*;
 
     #[test]
     fn parameters_json_parse() {
+        let params = Parameters {
+            task_id: [
+                0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+                10, 11, 12, 13, 14, 15,
+            ],
+            aggregator_urls: vec![
+                "https://leader.fake".try_into().unwrap(),
+                "https://helper.fake".try_into().unwrap(),
+            ],
+            collector_config: hpke::Config {
+                id: 1,
+                kem_id: hpke::KeyEncapsulationMechanism::X25519HkdfSha256,
+                kdf_id: hpke::KeyDerivationFunction::HkdfSha256,
+                aead_id: hpke::AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305,
+                public_key: vec![
+                    3, 20, 3, 245, 218, 218, 141, 106, 244, 32, 137, 7, 239, 142, 236, 187, 223,
+                    40, 226, 20, 103, 206, 127, 111, 201, 43, 163, 129, 97, 74, 254, 75,
+                ],
+                private_key: Some(vec![
+                    200, 136, 138, 82, 174, 13, 162, 51, 213, 94, 11, 15, 141, 167, 166, 44, 216,
+                    99, 180, 36, 212, 230, 85, 89, 67, 139, 199, 181, 108, 134, 250, 89,
+                ]),
+            },
+            max_batch_lifetime: 1,
+            min_batch_size: 100,
+            min_batch_duration: 100000,
+            protocol_parameters: ProtocolParameters::Prio {
+                field: PrioField::Field80,
+                prio_type: PrioType::PolyCheckedVector { start: 0, end: 2 },
+            },
+        };
+
         let json_string = r#"
 {
-    "task_id": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    "task_id": "AAECAwQFBgcICQoLDA0ODwABAgMEBQYHCAkKCwwNDg8=",
     "aggregator_urls": [
-        "https://leader.fake",
-        "https://helper.fake"
+        "https://leader.fake/",
+        "https://helper.fake/"
     ],
     "collector_config": {
         "id": 1,
-        "kem_id": 16,
+        "kem_id": 32,
         "kdf_id": 1,
         "aead_id": 3,
-        "public_key": [0, 1, 2, 3]
+        "public_key": "AxQD9drajWr0IIkH747su98o4hRnzn9vySujgWFK/ks=",
+        "private_key": "yIiKUq4NojPVXgsPjaemLNhjtCTU5lVZQ4vHtWyG+lk="
     },
     "max_batch_lifetime": 1,
     "min_batch_size": 100,
@@ -188,10 +245,11 @@ mod tests {
 }
 "#;
 
-        let params = Parameters::from_json_reader(json_string.as_bytes()).unwrap();
+        let params_from_json = Parameters::from_json_reader(json_string.as_bytes()).unwrap();
         let back_to_json = serde_json::to_string(&params).unwrap();
         let params_again = Parameters::from_json_reader(back_to_json.as_bytes()).unwrap();
 
         assert_eq!(params, params_again);
+        assert_eq!(params_from_json, params);
     }
 }
