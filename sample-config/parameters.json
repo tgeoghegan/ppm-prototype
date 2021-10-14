@@ -9,7 +9,7 @@
         "kem_id": 32,
         "kdf_id": 1,
         "aead_id": 3,
-        "public_key":"sqKGJNLZMCT2MK4doZHoJGO6A6CS3kPzAqxJnyeriVI=",
+        "public_key":"sqKGJNLZMCT2MK4doZHoJGO6A6CS3kPzAqxJnyeriVI="
     },
     "max_batch_lifetime": 1,
     "min_batch_size": 100,

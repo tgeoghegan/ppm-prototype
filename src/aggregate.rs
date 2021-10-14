@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use prio::{
     field::Field64,
     pcp::types::Boolean,
-    vdaf::{suite::Key, AggregatorState, VerifierMessage},
+    vdaf::{suite::Key, VerifyParam},
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Debug};
@@ -18,71 +18,54 @@ use tracing::info;
 /// Returns a fixed vector of randomness to be used in Boolean<Field64> values,
 /// in anticipation of cjpatton working out how aggregators will negotiate
 /// query randomness.
-pub(crate) fn boolean_initial_aggregator_state(
-    role: crate::hpke::Role,
-) -> AggregatorState<Boolean<Field64>> {
-    AggregatorState::Ready {
+pub(crate) fn boolean_verify_parameter(role: crate::hpke::Role) -> VerifyParam<Boolean<Field64>> {
+    VerifyParam {
+        value_param: (),
+        query_rand_init: Key::Aes128CtrHmacSha256([1; 32]),
         aggregator_id: role.index() as u8,
-        input_param: (),
-        query_rand_seed: Key::Aes128CtrHmacSha256([1; 32]),
     }
 }
 
-/// An aggregate request sent to a leader from a helper.
+/// A verify start request sent to a leader from a helper
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AggregateRequest<F> {
+pub struct VerifyStartRequest {
     pub task_id: TaskId,
     pub helper_state: Vec<u8>,
+    // Aggregation parameter is not used in prio3
+    #[serde(skip_serializing_if = "Option::is_none", rename = "aggregation_param")]
+    pub aggregation_parameter: Option<Vec<u8>>,
     #[serde(rename = "seq")]
-    pub sub_requests: Vec<AggregateSubRequest<F>>,
+    pub sub_requests: Vec<VerifyStartSubRequest>,
 }
 
-/// Sub-request in an aggregate request
+/// Sub-request in a verify start request
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AggregateSubRequest<F> {
+pub struct VerifyStartSubRequest {
     #[serde(flatten)]
     pub timestamp: Timestamp,
     pub extensions: Vec<ReportExtension>,
+    // For prio3, this is a `serde_json` encoded `vdaf::VerifyMessage`. For
+    // Hits, ???
+    pub verify_message: Vec<u8>,
     pub helper_share: EncryptedInputShare,
-    #[serde(flatten)]
-    pub protocol_parameters: ProtocolAggregateSubRequestFields<F>,
 }
 
-/// The protocol specific portions of AggregateSubRequest
+/// The response to a verify start request (and verify next, but that is not
+/// used in prio3)
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum ProtocolAggregateSubRequestFields<F> {
-    /// Prio-specific parameters
-    Prio {
-        /// Message containing the leader's proof/verifier share.
-        leader_verifier_message: VerifierMessage<F>,
-    },
-    Hits {},
-}
-
-/// The response to an aggregation request
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AggregateResponse<F> {
+pub struct VerifyResponse {
     pub helper_state: Vec<u8>,
-    pub sub_responses: Vec<AggregateSubResponse<F>>,
+    pub sub_responses: Vec<VerifySubResponse>,
 }
 
-/// Sub-response in an aggregation response
+/// Sub-response in a verify response
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct AggregateSubResponse<F> {
+pub struct VerifySubResponse {
     #[serde(flatten)]
     pub timestamp: Timestamp,
-    #[serde(flatten)]
-    pub protocol_parameters: ProtocolAggregateSubResponseFields<F>,
-}
-
-/// The protocol specific portions of AggregateSubResponse
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub enum ProtocolAggregateSubResponseFields<F> {
-    /// Prio-specific parameters
-    Prio {
-        helper_verifier_message: VerifierMessage<F>,
-    },
-    Hits {},
+    // For prio3, this is a `serde_json` encoded `vdaf::VerifyMessage`. For
+    // Hits, ???
+    pub verification_message: Vec<u8>,
 }
 
 /// Accumulator for some aggregation interval

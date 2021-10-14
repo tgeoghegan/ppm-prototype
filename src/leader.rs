@@ -2,14 +2,14 @@
 
 use crate::{
     aggregate::{
-        boolean_initial_aggregator_state, dump_accumulators, Accumulator, AggregateRequest,
-        AggregateResponse, AggregateSubRequest, ProtocolAggregateSubRequestFields,
-        ProtocolAggregateSubResponseFields,
+        boolean_verify_parameter, dump_accumulators, Accumulator, VerifyResponse,
+        VerifyStartRequest, VerifyStartSubRequest,
     },
     collect::{
         CollectRequest, CollectResponse, EncryptedOutputShare, OutputShare, OutputShareRequest,
     },
     hpke::{self, Role},
+    merge_vector,
     parameters::{Parameters, TaskId},
     upload::{EncryptedInputShare, Report, ReportExtension},
     IntervalStart, Timestamp,
@@ -18,11 +18,9 @@ use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
 use http::StatusCode;
 use prio::{
-    field::{merge_vector, Field64, FieldElement, FieldError},
+    field::{Field64, FieldElement, FieldError},
     pcp::{types::Boolean, Value},
-    vdaf::{
-        verify_finish, verify_start, AggregatorState, InputShareMessage, VdafError, VerifierMessage,
-    },
+    vdaf::{prio3_finish, prio3_start, InputShareMessage, VdafError, VerifyMessage, VerifyState},
 };
 use reqwest::Client;
 use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
@@ -39,7 +37,7 @@ static LEADER_USER_AGENT: &str = concat!(
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("JSON parse error")]
-    JsonParse(#[from] serde_json::error::Error),
+    JsonParse(#[from] serde_json::Error),
     #[error("encryption error")]
     Encryption(#[from] crate::hpke::Error),
     #[error("unknown task ID")]
@@ -64,14 +62,16 @@ pub enum Error {
     CollectProtocol(String),
     #[error("Insufficient contributions in interval described by collect request: {0}")]
     InsufficientContributions(u64),
+    #[error("Length mismatch")]
+    LengthMismatch,
 }
 
 /// In-memory representation of an input stored by the leader
 #[derive(Clone, Debug)]
 pub struct StoredInputShare<F: FieldElement, V: Value<Field = F>> {
     pub timestamp: Timestamp,
-    pub leader_state: AggregatorState<V>,
-    pub leader_verifier_message: VerifierMessage<F>,
+    pub leader_state: VerifyState<V>,
+    pub leader_verifier_message: VerifyMessage<F>,
     pub encrypted_helper_share: EncryptedInputShare,
     pub extensions: Vec<ReportExtension>,
 }
@@ -155,13 +155,15 @@ impl Leader {
         let decrypted_input_share = hpke_recipient
             .decrypt_input_share(leader_share, &report.timestamp.associated_data())?;
 
-        let leader_state = boolean_initial_aggregator_state(Role::Leader);
-
         let input_share_message: InputShareMessage<Field64> =
             serde_json::from_slice(&decrypted_input_share)?;
 
-        let (state, verifier) =
-            verify_start::<Boolean<Field64>>(leader_state, input_share_message)?;
+        // We use the report timestamp as the VDAF nonce
+        let (state, verifier) = prio3_start::<Boolean<Field64>>(
+            &boolean_verify_parameter(Role::Leader),
+            &report.timestamp.associated_data(),
+            input_share_message,
+        )?;
 
         self.unaggregated_inputs.push(StoredInputShare {
             timestamp: report.timestamp,
@@ -198,21 +200,22 @@ impl Leader {
 
     #[tracing::instrument(err, skip(self))]
     async fn send_aggregate_request(&mut self) -> Result<(), Error> {
-        let aggregate_sub_requests: Vec<AggregateSubRequest<Field64>> = self
+        let aggregate_sub_requests: Vec<VerifyStartSubRequest> = self
             .unaggregated_inputs
             .iter()
-            .map(|stored_input| AggregateSubRequest {
-                timestamp: stored_input.timestamp,
-                extensions: stored_input.extensions.clone(),
-                helper_share: stored_input.encrypted_helper_share.clone(),
-                protocol_parameters: ProtocolAggregateSubRequestFields::Prio {
-                    leader_verifier_message: stored_input.leader_verifier_message.clone(),
-                },
+            .map(|stored_input| {
+                Ok(VerifyStartSubRequest {
+                    timestamp: stored_input.timestamp,
+                    extensions: stored_input.extensions.clone(),
+                    verify_message: serde_json::to_vec(&stored_input.leader_verifier_message)?,
+                    helper_share: stored_input.encrypted_helper_share.clone(),
+                })
             })
-            .collect();
+            .collect::<Result<_, serde_json::Error>>()?;
 
-        let aggregate_request = AggregateRequest {
+        let aggregate_request = VerifyStartRequest {
             task_id: self.parameters.task_id,
+            aggregation_parameter: None,
             helper_state: self.helper_state.clone(),
             sub_requests: aggregate_sub_requests,
         };
@@ -235,7 +238,7 @@ impl Leader {
         // method, so reinitialize the leader's unaggregated inputs to empty.
         let leader_inputs = std::mem::take(&mut self.unaggregated_inputs);
 
-        let aggregate_response: AggregateResponse<Field64> = http_response.json().await?;
+        let aggregate_response: VerifyResponse = http_response.json().await?;
 
         if leader_inputs.len() != aggregate_response.sub_responses.len() {
             return Err(Error::AggregateProtocol(format!(
@@ -258,17 +261,8 @@ impl Leader {
                 )));
             }
 
-            let helper_verifier_message = match helper_response.protocol_parameters {
-                ProtocolAggregateSubResponseFields::Prio {
-                    helper_verifier_message: message,
-                } => message,
-                _ => {
-                    return Err(Error::AggregateProtocol(format!(
-                        "unsupported protocol in sub-response for report {}",
-                        leader_input.timestamp
-                    )))
-                }
-            };
+            let helper_verifier_message: VerifyMessage<Field64> =
+                serde_json::from_slice(&helper_response.verification_message)?;
 
             let interval_start = leader_input
                 .timestamp
@@ -282,7 +276,7 @@ impl Leader {
                 "verifying proof"
             );
 
-            let input_share = match verify_finish(
+            let input_share = match prio3_finish(
                 leader_input.leader_state,
                 [
                     helper_verifier_message,
@@ -304,7 +298,8 @@ impl Leader {
             // Proof checked out -- sum the input share into the accumulator for
             // the batch interval corresponding to the report timestamp.
             if let Some(sum) = self.accumulators.get_mut(&interval_start) {
-                merge_vector(&mut sum.accumulated, input_share.as_slice())?;
+                merge_vector(&mut sum.accumulated, input_share.as_slice())
+                    .map_err(|_| Error::LengthMismatch)?;
                 sum.contributions += 1;
             } else {
                 // This is the first input we have seen for this batch interval.
@@ -386,10 +381,17 @@ impl Leader {
             );
             match self.accumulators.get_mut(&interval_start) {
                 Some(accumulator) => {
+                    if accumulator.privacy_budget == self.parameters.max_batch_lifetime {
+                        return Err(Error::CollectProtocol(format!(
+                            "privacy budget exceeded ({})",
+                            self.parameters.max_batch_lifetime
+                        )));
+                    }
                     match output_sum {
                         Some(ref mut inner_output_sum) => {
                             // merge in subsequent accumulators
-                            merge_vector(inner_output_sum, &accumulator.accumulated)?;
+                            merge_vector(inner_output_sum, &accumulator.accumulated)
+                                .map_err(|_| Error::LengthMismatch)?;
                         }
                         // Initialize output sum with first non-empty accumulator
                         None => output_sum = Some(accumulator.accumulated.clone()),

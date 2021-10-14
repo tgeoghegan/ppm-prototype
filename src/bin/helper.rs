@@ -1,14 +1,13 @@
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Context, Result};
 use http::StatusCode;
 use ppm_prototype::{
-    aggregate::AggregateRequest,
+    aggregate::VerifyStartRequest,
     collect::OutputShareRequest,
     helper::Helper,
     hpke::{self, Role},
     parameters::Parameters,
     trace, with_shared_value,
 };
-use prio::field::Field64;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tracing::{error, info};
 use warp::{reply, Filter};
@@ -18,12 +17,13 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     trace::install_subscriber();
 
-    let ppm_parameters = Parameters::from_config_file()?;
+    let ppm_parameters = Parameters::from_config_file().wrap_err("loading task parameters")?;
     let port = ppm_parameters.aggregator_urls[Role::Helper.index()]
         .port()
         .unwrap_or(80);
 
-    let hpke_config = hpke::Config::from_config_file(Role::Helper)?;
+    let hpke_config =
+        hpke::Config::from_config_file(Role::Helper).wrap_err("loading HPKE config")?;
     let hpke_config_endpoint = hpke_config.warp_endpoint();
 
     let aggregate = warp::post()
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         .and(with_shared_value(ppm_parameters.clone()))
         .and(with_shared_value(hpke_config.clone()))
         .map(
-            move |aggregate_request: AggregateRequest<Field64>,
+            move |aggregate_request: VerifyStartRequest,
                   ppm_parameters: Parameters,
                   hpke_config: hpke::Config| {
                 // We intentionally create a new instance of Helper every time we

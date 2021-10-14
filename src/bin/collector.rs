@@ -2,10 +2,11 @@ use color_eyre::eyre::{eyre, Result};
 use ppm_prototype::{
     collect::{CollectRequest, CollectResponse, OutputShare, ProtocolCollectFields},
     hpke::{self, Role},
+    merge_vector,
     parameters::Parameters,
     trace, Interval,
 };
-use prio::field::{merge_vector, Field64, FieldElement};
+use prio::field::{Field64, FieldElement};
 use reqwest::Client;
 use tracing::info;
 
@@ -48,7 +49,7 @@ async fn main() -> Result<()> {
     let status = collect_response.status();
     info!(http_status = ?status, "collect request HTTP status");
     if !status.is_success() {
-        return Err(eyre!("collect request failed"));
+        return Err(eyre!(format!("collect request failed: {}", status)));
     }
 
     let collect_response_body: CollectResponse = collect_response.json().await?;
@@ -84,9 +85,14 @@ async fn main() -> Result<()> {
     let mut leader_share = Field64::byte_slice_into_vec(&decrypted_leader_share.sum)?;
     let helper_share = Field64::byte_slice_into_vec(&decrypted_helper_share.sum)?;
 
-    merge_vector(&mut leader_share, &helper_share)?;
+    merge_vector(&mut leader_share, &helper_share)
+        .map_err(|e| eyre!(format!("failed to merge: {}", e)))?;
 
     info!(aggregate = ?leader_share, "reassembled aggregate");
+
+    if !leader_share.first().unwrap().eq(&Field64::from(100)) {
+        return Err(eyre!("unexpected aggregation"));
+    }
 
     Ok(())
 }

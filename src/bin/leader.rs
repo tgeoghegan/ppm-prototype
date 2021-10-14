@@ -1,4 +1,4 @@
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Context, Result};
 use http::StatusCode;
 use ppm_prototype::{
     collect::CollectRequest,
@@ -22,11 +22,12 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     trace::install_subscriber();
 
-    let ppm_parameters = Parameters::from_config_file()?;
+    let ppm_parameters = Parameters::from_config_file().wrap_err("loading task parameters")?;
     let port = ppm_parameters.aggregator_urls[Role::Leader.index()]
         .port()
         .unwrap_or(80);
-    let hpke_config = hpke::Config::from_config_file(Role::Leader)?;
+    let hpke_config =
+        hpke::Config::from_config_file(Role::Leader).wrap_err("loading hpke config")?;
     let hpke_config_endpoint = hpke_config.warp_endpoint();
 
     let leader_aggregator = Arc::new(Mutex::new(Leader::new(&ppm_parameters, &hpke_config)?));

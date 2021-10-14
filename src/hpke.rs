@@ -85,6 +85,7 @@ pub struct Config {
     /// described in draft-irtf-cfrg-hpke-11, §4 and §7.1.2. This value will not
     /// be present when advertised by a server from hpke_config.
     #[serde(
+        default,
         skip_serializing_if = "Option::is_none",
         serialize_with = "base64::serialize_bytes_option",
         deserialize_with = "base64::deserialize_bytes_option"
@@ -156,6 +157,7 @@ impl Config {
             .map(move || {
                 reply::with_status(reply::json(&config_without_private_key), StatusCode::OK)
             })
+            .map(|r| reply::with_header(r, http::header::CACHE_CONTROL, "max-age=86400"))
             .with(warp::trace::named("hpke_config"))
             .boxed()
     }

@@ -2,12 +2,12 @@
 
 use crate::{
     aggregate::{
-        boolean_initial_aggregator_state, dump_accumulators, Accumulator, AggregateRequest,
-        AggregateResponse, AggregateSubResponse, ProtocolAggregateSubRequestFields,
-        ProtocolAggregateSubResponseFields,
+        boolean_verify_parameter, dump_accumulators, Accumulator, VerifyResponse,
+        VerifyStartRequest, VerifySubResponse,
     },
     collect::{EncryptedOutputShare, OutputShare, OutputShareRequest},
     hpke::{self, Role},
+    merge_vector,
     parameters::{Parameters, TaskId},
     IntervalStart, Timestamp,
 };
@@ -15,9 +15,9 @@ use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
 use http::StatusCode;
 use prio::{
-    field::{merge_vector, Field64, FieldElement, FieldError},
+    field::{Field64, FieldElement, FieldError},
     pcp::{types::Boolean, Value},
-    vdaf::{verify_finish, verify_start, InputShareMessage, VdafError},
+    vdaf::{prio3_finish, prio3_start, InputShareMessage, VdafError, VerifyMessage},
 };
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
@@ -47,6 +47,8 @@ pub enum Error {
     PrioField(#[from] FieldError),
     #[error("Insufficient contributions in interval described by collect request: {0}")]
     InsufficientContributions(u64),
+    #[error("Length mismatch")]
+    LengthMismatch,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -91,8 +93,8 @@ impl Helper {
     #[tracing::instrument(skip(request, self), err)]
     pub fn handle_aggregate(
         &mut self,
-        request: &AggregateRequest<Field64>,
-    ) -> Result<AggregateResponse<Field64>, Error> {
+        request: &VerifyStartRequest,
+    ) -> Result<VerifyResponse, Error> {
         info!(
             sub_request_count = request.sub_requests.len(),
             "got aggregate request"
@@ -139,26 +141,18 @@ impl Helper {
                 &sub_request.timestamp.associated_data(),
             )?;
 
-            let initial_state = boolean_initial_aggregator_state(Role::Helper);
-
             let input_share_message: InputShareMessage<Field64> =
                 serde_json::from_slice(&decrypted_input_share)?;
 
             // Construct helper verifier message
-            let (state, helper_verifier_message) =
-                verify_start::<Boolean<Field64>>(initial_state, input_share_message)?;
+            let (state, helper_verifier_message) = prio3_start::<Boolean<Field64>>(
+                &boolean_verify_parameter(Role::Helper),
+                &sub_request.timestamp.associated_data(),
+                input_share_message,
+            )?;
 
-            let leader_verifier_message = match &sub_request.protocol_parameters {
-                ProtocolAggregateSubRequestFields::Prio {
-                    leader_verifier_message: message,
-                } => message,
-                _ => {
-                    return Err(Error::AggregateProtocol(format!(
-                        "unsupported protocol in sub-response for report {}",
-                        sub_request.timestamp
-                    )))
-                }
-            };
+            let leader_verifier_message: VerifyMessage<Field64> =
+                serde_json::from_slice(&sub_request.verify_message)?;
 
             info!(
                 timestamp = ?sub_request.timestamp,
@@ -171,7 +165,7 @@ impl Helper {
             // shares: taking Vec<VerifierMessage> instead of &[VerifierMessage]
             // forces allocation + copy to the heap, even if I own the value of
             // leader_verifier_message, and it's not clear that I do.
-            match verify_finish(
+            match prio3_finish(
                 state,
                 [
                     leader_verifier_message.clone(),
@@ -187,7 +181,8 @@ impl Helper {
                         .time
                         .interval_start(self.parameters.min_batch_duration);
                     if let Some(sum) = self.helper_state.accumulators.get_mut(&interval_start) {
-                        merge_vector(&mut sum.accumulated, input_share.as_slice())?;
+                        merge_vector(&mut sum.accumulated, input_share.as_slice())
+                            .map_err(|_| Error::LengthMismatch)?;
                         sum.contributions += 1;
                     } else {
                         // This is the first input we have seen for this batch interval.
@@ -212,11 +207,9 @@ impl Helper {
                 }
             }
 
-            sub_responses.push(AggregateSubResponse {
+            sub_responses.push(VerifySubResponse {
                 timestamp: sub_request.timestamp,
-                protocol_parameters: ProtocolAggregateSubResponseFields::Prio {
-                    helper_verifier_message,
-                },
+                verification_message: serde_json::to_vec(&helper_verifier_message)?,
             });
 
             self.helper_state.last_timestamp_seen = sub_request.timestamp;
@@ -224,7 +217,7 @@ impl Helper {
 
         dump_accumulators(&self.helper_state.accumulators);
 
-        Ok(AggregateResponse {
+        Ok(VerifyResponse {
             helper_state: serde_json::to_vec(&self.helper_state)?,
             sub_responses,
         })
@@ -272,10 +265,17 @@ impl Helper {
             info!(?interval_start);
             match self.helper_state.accumulators.get_mut(&interval_start) {
                 Some(accumulator) => {
+                    if accumulator.privacy_budget == self.parameters.max_batch_lifetime {
+                        return Err(Error::AggregateProtocol(format!(
+                            "privacy budget exceeded ({})",
+                            self.parameters.max_batch_lifetime
+                        )));
+                    }
                     match output_sum {
                         Some(ref mut inner_output_sum) => {
                             // merge in subsequent accumulators
-                            merge_vector(inner_output_sum, &accumulator.accumulated)?;
+                            merge_vector(inner_output_sum, &accumulator.accumulated)
+                                .map_err(|_| Error::LengthMismatch)?;
                         }
                         // Initialize output sum with first non-empty accumulator
                         None => output_sum = Some(accumulator.accumulated.clone()),
