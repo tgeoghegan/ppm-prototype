@@ -9,10 +9,11 @@ use crate::{
     hpke::{self, Role},
     merge_vector,
     parameters::{Parameters, TaskId},
-    IntervalStart, Timestamp,
+    with_shared_value, IntervalStart, Timestamp,
 };
 use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
+use color_eyre::eyre::Result;
 use http::StatusCode;
 use prio::{
     field::{Field64, FieldElement, FieldError},
@@ -20,8 +21,10 @@ use prio::{
     vdaf::{prio3_finish, prio3_start, InputShareMessage, VdafError, VerifyMessage},
 };
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
 use tracing::{error, info, warn};
+use warp::{reply, Filter};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -320,4 +323,89 @@ impl Helper {
             payload,
         })
     }
+}
+
+pub async fn run_helper(ppm_parameters: Parameters, hpke_config: hpke::Config) -> Result<()> {
+    let port = ppm_parameters.aggregator_urls[Role::Helper.index()]
+        .port()
+        .unwrap_or(80);
+
+    let hpke_config_endpoint = hpke_config.warp_endpoint();
+
+    let aggregate = warp::post()
+        .and(warp::path("aggregate"))
+        .and(warp::body::json())
+        .and(with_shared_value(ppm_parameters.clone()))
+        .and(with_shared_value(hpke_config.clone()))
+        .map(
+            move |aggregate_request: VerifyStartRequest,
+                  ppm_parameters: Parameters,
+                  hpke_config: hpke::Config| {
+                // We intentionally create a new instance of Helper every time we
+                // handle a request to prove that we can successfully execute the
+                // protocol without maintaining local state
+                let mut helper_aggregator = match Helper::new(
+                    &ppm_parameters,
+                    &hpke_config,
+                    &aggregate_request.helper_state,
+                ) {
+                    Ok(helper) => helper,
+                    Err(e) => {
+                        error!(error = ?e, "failed to create helper aggregator with state");
+                        return reply::with_status(reply::json(&()), StatusCode::BAD_REQUEST);
+                    }
+                };
+
+                match helper_aggregator.handle_aggregate(&aggregate_request) {
+                    Ok(response) => reply::with_status(reply::json(&response), StatusCode::OK),
+                    Err(e) => {
+                        error!(error = ?e, "failed to handle aggregate request");
+                        reply::with_status(reply::json(&()), StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                }
+            },
+        )
+        .with(warp::trace::named("aggregate"));
+
+    let output_share = warp::post()
+        .and(warp::path("output_share"))
+        .and(warp::body::json())
+        .and(with_shared_value(ppm_parameters.clone()))
+        .and(with_shared_value(hpke_config.clone()))
+        .map(
+            move |output_share_request: OutputShareRequest,
+                  ppm_parameters: Parameters,
+                  hpke_config: hpke::Config| {
+                let mut helper_aggregator = match Helper::new(
+                    &ppm_parameters,
+                    &hpke_config,
+                    &output_share_request.helper_state,
+                ) {
+                    Ok(helper) => helper,
+                    Err(_) => {
+                        return reply::with_status(reply::json(&()), StatusCode::BAD_REQUEST);
+                    }
+                };
+
+                match helper_aggregator.handle_output_share(&output_share_request) {
+                    Ok(response) => reply::with_status(reply::json(&response), StatusCode::OK),
+                    Err(_) => {
+                        reply::with_status(reply::json(&()), StatusCode::INTERNAL_SERVER_ERROR)
+                    }
+                }
+            },
+        )
+        .with(warp::trace::named("output_share"));
+
+    let routes = hpke_config_endpoint
+        .or(aggregate)
+        .or(output_share)
+        .with(warp::trace::request());
+
+    info!("helper serving on 0.0.0.0:{}", port);
+    warp::serve(routes)
+        .run(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), port))
+        .await;
+
+    unreachable!()
 }

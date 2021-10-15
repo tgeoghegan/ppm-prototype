@@ -64,7 +64,7 @@ impl Parameters {
     /// Ideally this would be an implementation of `TryFrom<R: Read>` on
     /// `Parameters` but you can't provide generic implementations of `TryFrom`:
     /// https://github.com/rust-lang/rust/issues/50133
-    fn from_json_reader<R: Read>(reader: R) -> Result<Self, Error> {
+    pub fn from_json_reader<R: Read>(reader: R) -> Result<Self, Error> {
         Ok(serde_json::from_reader(reader)?)
     }
 

@@ -1,4 +1,5 @@
 pub mod aggregate;
+pub mod client;
 pub mod collect;
 pub mod helper;
 pub mod hpke;
