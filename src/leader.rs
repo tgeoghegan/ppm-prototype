@@ -15,7 +15,7 @@ use crate::{
 };
 use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
-use color_eyre::eyre::{Context, Result};
+use color_eyre::eyre::Result;
 use http::StatusCode;
 use prio::{
     field::{Field64, FieldElement, FieldError},

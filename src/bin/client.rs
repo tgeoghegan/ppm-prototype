@@ -1,110 +1,7 @@
-use ::hpke::Serializable;
-use color_eyre::eyre::{eyre, Context, Result};
-use http::StatusCode;
-use ppm_prototype::{
-    hpke::{self, Role},
-    parameters::{Parameters, PrioField, PrioType, ProtocolParameters},
-    trace,
-    upload::{EncryptedInputShare, Report},
-    Timestamp,
-};
-use prio::{
-    field::Field64,
-    pcp::types::Boolean,
-    vdaf::{prio3_input, suite::Suite},
-};
-use reqwest::Client;
+use color_eyre::eyre::{Context, Result};
+use ppm_prototype::{client::Client, parameters::Parameters, trace};
+use prio::{field::Field64, pcp::types::Boolean};
 use tracing::info;
-
-static CLIENT_USER_AGENT: &str = concat!(
-    env!("CARGO_PKG_NAME"),
-    "/",
-    env!("CARGO_PKG_VERSION"),
-    "/",
-    "client"
-);
-
-async fn do_upload(
-    count: u64,
-    http_client: &Client,
-    ppm_parameters: &Parameters,
-    leader_hpke_config: &hpke::Config,
-    helper_hpke_config: &hpke::Config,
-) -> Result<()> {
-    // TODO(timg): I don't like partially constructing the Report and then
-    // filling in `encrypted_input_shares` later. Maybe impl Default on Report.
-    let mut report = Report {
-        timestamp: Timestamp {
-            time: 1631907500 + count,
-            nonce: rand::random(),
-        },
-        task_id: ppm_parameters.task_id,
-        extensions: vec![],
-        encrypted_input_shares: vec![],
-    };
-
-    match ppm_parameters.protocol_parameters {
-        ProtocolParameters::Prio {
-            field: PrioField::Field64,
-            prio_type: PrioType::Boolean,
-        } => (),
-        _ => return Err(eyre!("only Prio is supported")),
-    }
-
-    // Generate a Prio input and proof. The serialized format is input share
-    // then proof share.
-    let input: Boolean<Field64> = Boolean::new(true);
-    let upload_messages = prio3_input(Suite::Aes128CtrHmacSha256, &input, 2)?;
-
-    // `Report.EncryptedInputShare.payload` is the encryption of a serialized
-    // Prio `Upload[Message]`. Eventually we will implement serialization to
-    // TLS presentation language, but for the time being we use JSON, hence
-    // these explicit serde_json::to_vec calls. This is probably brittle because
-    // we're depending on Serde to emit a "canonical" JSON encoding of a
-    // message.
-    let json_leader_share = serde_json::to_vec(&upload_messages[Role::Leader.index()])?;
-    let json_helper_share = serde_json::to_vec(&upload_messages[Role::Helper.index()])?;
-
-    // We have to create a new HPKE context for each message, or the nonces
-    // won't line up with the recipient.
-    let leader_hpke_sender =
-        leader_hpke_config.report_sender(&ppm_parameters.task_id, Role::Leader)?;
-
-    let helper_hpke_sender =
-        helper_hpke_config.report_sender(&ppm_parameters.task_id, Role::Helper)?;
-
-    let (leader_payload, leader_encapped_key) =
-        leader_hpke_sender.encrypt_input_share(&report, &json_leader_share)?;
-    let (helper_payload, helper_encapped_key) =
-        helper_hpke_sender.encrypt_input_share(&report, &json_helper_share)?;
-    report.encrypted_input_shares = vec![
-        EncryptedInputShare {
-            aggregator_config_id: leader_hpke_config.id,
-            encapsulated_context: leader_encapped_key.to_bytes().to_vec(),
-            payload: leader_payload,
-        },
-        EncryptedInputShare {
-            aggregator_config_id: helper_hpke_config.id,
-            encapsulated_context: helper_encapped_key.to_bytes().to_vec(),
-            payload: helper_payload,
-        },
-    ];
-
-    let status = http_client
-        .post(ppm_parameters.upload_endpoint()?)
-        .json(&report)
-        .send()
-        .await?
-        .status();
-    if status != StatusCode::OK {
-        return Err(eyre!(
-            "unexpected HTTP status in upload request {:?}",
-            status
-        ));
-    }
-
-    Ok(())
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -112,27 +9,14 @@ async fn main() -> Result<()> {
     color_eyre::install()?;
     trace::install_subscriber();
 
-    let http_client = Client::builder().user_agent(CLIENT_USER_AGENT).build()?;
-
     let ppm_parameters = Parameters::from_config_file().wrap_err("loading task parameters")?;
 
-    let leader_hpke_config = ppm_parameters
-        .hpke_config(Role::Leader, &http_client)
-        .await?;
-
-    let helper_hpke_config = ppm_parameters
-        .hpke_config(Role::Helper, &http_client)
-        .await?;
+    let client = Client::new(&ppm_parameters).await?;
 
     for count in 0..100 {
-        do_upload(
-            count,
-            &http_client,
-            &ppm_parameters,
-            &leader_hpke_config,
-            &helper_hpke_config,
-        )
-        .await?;
+        client
+            .do_upload(count, Boolean::<Field64>::new(true))
+            .await?;
     }
 
     info!("completed uploads");

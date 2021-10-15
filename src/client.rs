@@ -1,5 +1,3 @@
-use std::io::Read;
-
 use crate::{
     hpke::{self, Role},
     parameters::{Parameters, PrioField, PrioType, ProtocolParameters},
