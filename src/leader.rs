@@ -7,6 +7,7 @@ use crate::{
     collect::{
         CollectRequest, CollectResponse, EncryptedOutputShare, OutputShare, OutputShareRequest,
     },
+    handle_rejection,
     hpke::{self, Role},
     merge_vector,
     parameters::{Parameters, TaskId},
@@ -17,6 +18,7 @@ use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
 use color_eyre::eyre::Result;
 use http::StatusCode;
+use http_api_problem::HttpApiProblem;
 use prio::{
     field::{Field64, FieldElement, FieldError},
     pcp::{types::Boolean, Value},
@@ -32,7 +34,7 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tracing::{error, info, warn};
-use warp::{reply, Filter};
+use warp::{reject::Reject, reply, Filter, Rejection};
 
 static LEADER_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
@@ -48,8 +50,8 @@ pub enum Error {
     JsonParse(#[from] serde_json::Error),
     #[error("encryption error")]
     Encryption(#[from] crate::hpke::Error),
-    #[error("unknown task ID")]
-    UnknownTaskId(TaskId),
+    #[error("unrecognized task ID")]
+    UnrecognizedTask(TaskId),
     #[error("unknown HPKE config ID {0}")]
     UnknownHpkeConfig(u8),
     #[error("VDAF error")]
@@ -72,6 +74,28 @@ pub enum Error {
     InsufficientContributions(u64),
     #[error("Length mismatch")]
     LengthMismatch,
+}
+
+impl Error {
+    fn problem_document(
+        &self,
+        ppm_parameters: &Parameters,
+        endpoint: &'static str,
+    ) -> HttpApiProblem {
+        let problem_document = match self {
+            Error::JsonParse(e) => HttpApiProblem::new(StatusCode::BAD_REQUEST)
+                .type_url("urn:ietf:params:ppm:error:unrecognizedMessage")
+                .detail(format!("unparseable JSON message: {:?}", e)),
+            Error::UnrecognizedTask(task_id) => HttpApiProblem::new(StatusCode::BAD_REQUEST)
+                .type_url("urn:ietf:params:ppm:error:unrecognizedTask")
+                .detail(format!("unrecognized task ID {}", task_id)),
+            _ => HttpApiProblem::new(StatusCode::INTERNAL_SERVER_ERROR),
+        };
+
+        problem_document
+            .value("taskid", &ppm_parameters.task_id)
+            .instance(endpoint)
+    }
 }
 
 /// In-memory representation of an input stored by the leader
@@ -141,7 +165,7 @@ impl Leader {
         if report.task_id != self.parameters.task_id {
             // TODO(timg) construct problem document with type=unrecognizedTask
             // per section 3.1
-            return Err(Error::UnknownTaskId(report.task_id));
+            return Err(Error::UnrecognizedTask(report.task_id));
         }
 
         let leader_share = &report.encrypted_input_shares[Role::Leader.index()];
@@ -463,14 +487,12 @@ pub async fn run_leader(ppm_parameters: Parameters, hpke_config: hpke::Config) -
         .and(warp::body::json())
         .and(with_shared_value(leader_aggregator.clone()))
         .and_then(|report: Report, leader: Arc<Mutex<Leader>>| async move {
-            match leader.lock().await.handle_upload(&report).await {
+            let mut leader = leader.lock().await;
+            match leader.handle_upload(&report).await {
                 Ok(()) => Ok(reply::with_status(reply(), StatusCode::OK)),
-                Err(e) => {
-                    error!(error = ?e, "failed to handle upload");
-                    // TODO wire up a type that implements Reject and attach
-                    // a warp reject handler that constructs appropriate responses
-                    Err(warp::reject::not_found())
-                }
+                Err(e) => Err(warp::reject::custom(
+                    e.problem_document(&leader.parameters, "upload"),
+                )),
             }
         })
         .with(warp::trace::named("upload"));
@@ -481,9 +503,12 @@ pub async fn run_leader(ppm_parameters: Parameters, hpke_config: hpke::Config) -
         .and(with_shared_value(leader_aggregator.clone()))
         .and_then(
             |collect_request: CollectRequest, leader: Arc<Mutex<Leader>>| async move {
-                match leader.lock().await.handle_collect(&collect_request).await {
+                let mut leader = leader.lock().await;
+                match leader.handle_collect(&collect_request).await {
                     Ok(response) => Ok(reply::with_status(reply::json(&response), StatusCode::OK)),
-                    Err(_) => Err(warp::reject::not_found()),
+                    Err(e) => Err(warp::reject::custom(
+                        e.problem_document(&leader.parameters, "collect"),
+                    )),
                 }
             },
         )
@@ -492,6 +517,7 @@ pub async fn run_leader(ppm_parameters: Parameters, hpke_config: hpke::Config) -
     let routes = hpke_config_endpoint
         .or(upload)
         .or(collect)
+        .recover(handle_rejection)
         .with(warp::trace::request());
 
     info!("leader serving on 0.0.0.0:{}", port);

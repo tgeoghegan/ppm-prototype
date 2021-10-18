@@ -10,14 +10,17 @@ pub mod upload;
 
 use chrono::{DateTime, DurationRound, TimeZone, Utc};
 use directories::ProjectDirs;
+use http::StatusCode;
+use http_api_problem::HttpApiProblem;
 use prio::field::FieldElement;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
+    convert::Infallible,
     fmt::{self, Display, Formatter},
     path::PathBuf,
 };
-use warp::Filter;
+use warp::{reject::Rejection, Filter};
 
 /// Seconds elapsed since start of UNIX epoch
 pub type Time = u64;
@@ -122,4 +125,20 @@ pub fn merge_vector<F: FieldElement>(
     }
 
     Ok(())
+}
+
+/// warp rejection handler that can be tacked on to routes to construct a
+/// warp::Reply with appropriate status code and JSON body for an HTTP problem
+/// document.
+pub(crate) async fn handle_rejection(rejection: Rejection) -> Result<impl warp::Reply, Infallible> {
+    // All our warp rejections should wrap a problem document, so crash if we
+    // can't find one.
+    let problem_document = rejection.find::<HttpApiProblem>().unwrap();
+
+    Ok(warp::reply::with_status(
+        warp::reply::json(problem_document),
+        problem_document
+            .status
+            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    ))
 }

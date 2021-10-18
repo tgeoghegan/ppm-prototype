@@ -6,6 +6,7 @@ use crate::{
         VerifyStartRequest, VerifySubResponse,
     },
     collect::{EncryptedOutputShare, OutputShare, OutputShareRequest},
+    handle_rejection,
     hpke::{self, Role},
     merge_vector,
     parameters::{Parameters, TaskId},
@@ -400,6 +401,7 @@ pub async fn run_helper(ppm_parameters: Parameters, hpke_config: hpke::Config) -
     let routes = hpke_config_endpoint
         .or(aggregate)
         .or(output_share)
+        .recover(handle_rejection)
         .with(warp::trace::request());
 
     info!("helper serving on 0.0.0.0:{}", port);

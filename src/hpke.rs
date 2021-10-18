@@ -191,7 +191,7 @@ impl Config {
         // §4.2.2 Upload Request and §4.3.1 Aggregate Request
         [
             "pda input share".as_bytes(),
-            task_id,
+            task_id.as_bytes(),
             &[recipient_role as u8],
         ]
         .concat()
@@ -200,7 +200,12 @@ impl Config {
     /// Construct an application info string suitable for constructing HPKE
     /// contexts for sealing or opening PPM output shares
     fn output_share_application_info(task_id: &TaskId, sender_role: Role) -> Vec<u8> {
-        ["pda output share".as_bytes(), task_id, &[sender_role as u8]].concat()
+        [
+            "pda output share".as_bytes(),
+            task_id.as_bytes(),
+            &[sender_role as u8],
+        ]
+        .concat()
     }
 
     /// Construct an HPKE Sender suitable for encrypting `EncryptedInputShare`

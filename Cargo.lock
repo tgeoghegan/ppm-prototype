@@ -680,6 +680,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "http-api-problem"
+version = "0.50.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70f4e82d20d90ae962c19d69ade602c2fe2e9df48080ac03e4e3da07f07ae7a4"
+dependencies = [
+ "http",
+ "serde",
+ "serde_json",
+ "warp",
+]
+
+[[package]]
 name = "http-body"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1150,6 +1162,7 @@ dependencies = [
  "directories",
  "hpke",
  "http",
+ "http-api-problem",
  "prio",
  "rand 0.8.4",
  "reqwest",
