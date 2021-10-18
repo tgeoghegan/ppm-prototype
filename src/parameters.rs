@@ -6,13 +6,13 @@
 use crate::{
     config_path,
     hpke::{self, Role},
-    Duration, Interval, IntervalStart,
+    Duration, Interval,
 };
 use chrono::{TimeZone, Utc};
 use rand::{thread_rng, Rng};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::{fmt::Display, path::PathBuf};
 use std::{fs::File, io::Read};
 use url::Url;
 
@@ -109,22 +109,36 @@ impl Parameters {
             .join("output_share")?)
     }
 
-    /// Returns true if the batch interval is aligned with the minimum batch
-    /// duration
+    /// Returns true if the batch interval is aligned with and greater than the
+    /// minimum batch duration
     pub(crate) fn validate_batch_interval(&self, batch_interval: Interval) -> bool {
-        batch_interval.start.interval_start(self.min_batch_duration)
-            == Utc.timestamp(batch_interval.start as i64, 0)
+        batch_interval.end.0 - batch_interval.start.0 >= self.min_batch_duration
+            && batch_interval.start.interval_start(self.min_batch_duration)
+                == Utc.timestamp(batch_interval.start.0 as i64, 0)
             && batch_interval.end.interval_start(self.min_batch_duration)
-                == Utc.timestamp(batch_interval.end as i64, 0)
+                == Utc.timestamp(batch_interval.end.0 as i64, 0)
     }
 }
 
 /// Corresponds to a `TaskID`, defined in §4.1 of RFCXXXX. The task ID is
 /// the SHA-256 over a `struct PPMParam`.
-pub type TaskId = [u8; 32];
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskId([u8; 32]);
 
-pub fn new_task_id() -> TaskId {
-    thread_rng().gen::<[u8; 32]>()
+impl TaskId {
+    pub fn random() -> Self {
+        Self(thread_rng().gen::<[u8; 32]>())
+    }
+
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl Display for TaskId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", hex::encode(self.0))
+    }
 }
 
 mod base64 {
@@ -134,14 +148,15 @@ mod base64 {
     use std::convert::TryInto;
 
     pub fn serialize_taskid<S: Serializer>(v: &TaskId, s: S) -> Result<S::Ok, S::Error> {
-        String::serialize(&base64::encode(v), s)
+        String::serialize(&base64::encode(v.0), s)
     }
 
     pub fn deserialize_taskid<'de, D: Deserializer<'de>>(d: D) -> Result<TaskId, D::Error> {
-        base64::decode(String::deserialize(d)?.as_bytes())
+        let slice = base64::decode(String::deserialize(d)?.as_bytes())
             .map_err(Error::custom)?
             .try_into()
-            .map_err(|_| Error::custom("can't convert vec into TaskId"))
+            .map_err(|_| Error::custom("can't convert vec into TaskId"))?;
+        Ok(TaskId(slice))
     }
 }
 
@@ -184,10 +199,10 @@ mod tests {
     #[test]
     fn parameters_json_parse() {
         let params = Parameters {
-            task_id: [
+            task_id: TaskId([
                 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
                 10, 11, 12, 13, 14, 15,
-            ],
+            ]),
             aggregator_urls: vec![
                 "https://leader.fake".try_into().unwrap(),
                 "https://helper.fake".try_into().unwrap(),

@@ -17,7 +17,7 @@ use http::StatusCode;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use std::{fs::File, path::PathBuf};
+use std::{fs::File, io::Read, path::PathBuf};
 use warp::{filters::BoxedFilter, reply, Filter, Reply};
 
 #[derive(Debug, thiserror::Error)]
@@ -58,9 +58,16 @@ impl Role {
 /// Configuration file containing multiple HPKE configs
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct ConfigFile {
-    helper: Config,
-    leader: Config,
-    collector: Config,
+    pub helper: Config,
+    pub leader: Config,
+    pub collector: Config,
+}
+
+impl ConfigFile {
+    /// Load HPKE config from the JSON configuration file in the provided Read
+    pub fn from_json_reader<R: Read>(reader: R) -> Result<Self, Error> {
+        Ok(serde_json::from_reader(reader)?)
+    }
 }
 
 /// HPKE configuration for a PPM participant, corresponding to `struct
@@ -94,10 +101,10 @@ pub struct Config {
 }
 
 impl Config {
-    /// Load HPKE config from JSON
+    /// Load HPKE config from default configuration file
     pub fn from_config_file(role: Role) -> Result<Self, Error> {
         let hpke_config_path = config_path().join("hpke.json");
-        let config_file: ConfigFile = serde_json::from_reader(
+        let config_file = ConfigFile::from_json_reader(
             File::open(&hpke_config_path).map_err(|e| Error::File(e, hpke_config_path))?,
         )?;
 
@@ -191,7 +198,7 @@ impl Config {
         // §4.2.2 Upload Request and §4.3.1 Aggregate Request
         [
             "pda input share".as_bytes(),
-            task_id,
+            task_id.as_bytes(),
             &[recipient_role as u8],
         ]
         .concat()
@@ -200,7 +207,12 @@ impl Config {
     /// Construct an application info string suitable for constructing HPKE
     /// contexts for sealing or opening PPM output shares
     fn output_share_application_info(task_id: &TaskId, sender_role: Role) -> Vec<u8> {
-        ["pda output share".as_bytes(), task_id, &[sender_role as u8]].concat()
+        [
+            "pda output share".as_bytes(),
+            task_id.as_bytes(),
+            &[sender_role as u8],
+        ]
+        .concat()
     }
 
     /// Construct an HPKE Sender suitable for encrypting `EncryptedInputShare`

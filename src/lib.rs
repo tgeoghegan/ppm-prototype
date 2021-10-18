@@ -1,6 +1,7 @@
 pub mod aggregate;
 pub mod client;
 pub mod collect;
+mod error;
 pub mod helper;
 pub mod hpke;
 pub mod leader;
@@ -14,25 +15,29 @@ use prio::field::FieldElement;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
+    convert::Infallible,
     fmt::{self, Display, Formatter},
     path::PathBuf,
 };
 use warp::Filter;
 
 /// Seconds elapsed since start of UNIX epoch
-pub type Time = u64;
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+pub struct Time(u64);
 
-pub trait IntervalStart {
-    fn interval_start(self, min_batch_duration: Duration) -> DateTime<Utc>;
-}
-
-impl IntervalStart for Time {
+impl Time {
     /// Determine the start of the aggregation window that this report falls in,
     /// assuming the provided minimum batch duration
     fn interval_start(self, min_batch_duration: Duration) -> DateTime<Utc> {
-        Utc.timestamp(self as i64, 0)
+        Utc.timestamp(self.0 as i64, 0)
             .duration_trunc(chrono::Duration::seconds(min_batch_duration as i64))
             .unwrap()
+    }
+}
+
+impl Display for Time {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -72,7 +77,7 @@ impl Display for Timestamp {
 
 impl Timestamp {
     pub(crate) fn associated_data(&self) -> Vec<u8> {
-        [self.time.to_be_bytes(), self.nonce.to_be_bytes()].concat()
+        [self.time.0.to_be_bytes(), self.nonce.to_be_bytes()].concat()
     }
 }
 
@@ -90,7 +95,17 @@ pub struct Interval {
 
 impl Interval {
     pub(crate) fn associated_data(&self) -> Vec<u8> {
-        [self.start.to_be_bytes(), self.end.to_be_bytes()].concat()
+        [self.start.0.to_be_bytes(), self.end.0.to_be_bytes()].concat()
+    }
+
+    pub(crate) fn min_intervals_in_interval(&self, min_batch_duration: Duration) -> u64 {
+        (self.end.0 - self.start.0) / min_batch_duration
+    }
+}
+
+impl Display for Interval {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "[{} - {})", self.start, self.end)
     }
 }
 
@@ -104,7 +119,7 @@ pub(crate) fn config_path() -> PathBuf {
 // available to the filter's map() or and_then() handler.
 pub fn with_shared_value<T: Clone + Sync + Send>(
     value: T,
-) -> impl Filter<Extract = (T,), Error = std::convert::Infallible> + Clone {
+) -> impl Filter<Extract = (T,), Error = Infallible> + Clone {
     warp::any().map(move || value.clone())
 }
 

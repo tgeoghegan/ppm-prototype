@@ -1,11 +1,6 @@
 use ppm_prototype::{
-    client::Client,
-    collect::run_collect,
-    helper::run_helper,
-    hpke::{self, Role},
-    leader::run_leader,
-    parameters::Parameters,
-    trace,
+    client::Client, collect::run_collect, helper::run_helper, hpke, leader::run_leader,
+    parameters::Parameters, trace,
 };
 use prio::{field::Field64, pcp::types::Boolean};
 use std::io::Cursor;
@@ -18,13 +13,14 @@ async fn test() {
         "../sample-config/parameters.json"
     )))
     .unwrap();
-    let leader_hpke_config = hpke::Config::from_config_file(Role::Leader).unwrap();
-    let helper_hpke_config = hpke::Config::from_config_file(Role::Helper).unwrap();
-    let collector_hpke_config = hpke::Config::from_config_file(Role::Collector).unwrap();
+    let hpke_config = hpke::ConfigFile::from_json_reader(Cursor::new(include_bytes!(
+        "../sample-config/hpke.json"
+    )))
+    .unwrap();
 
     // Spawn leader and helper tasks
-    let leader_handle = tokio::spawn(run_leader(parameters.clone(), leader_hpke_config));
-    let helper_handle = tokio::spawn(run_helper(parameters.clone(), helper_hpke_config));
+    let leader_handle = tokio::spawn(run_leader(parameters.clone(), hpke_config.leader));
+    let helper_handle = tokio::spawn(run_helper(parameters.clone(), hpke_config.helper));
 
     // Generate and upload 100 reports
     let client = Client::new(&parameters).await.unwrap();
@@ -36,7 +32,7 @@ async fn test() {
     }
 
     // Collect
-    run_collect(&parameters, &collector_hpke_config)
+    run_collect(&parameters, &hpke_config.collector)
         .await
         .unwrap();
 

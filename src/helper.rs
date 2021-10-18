@@ -6,10 +6,11 @@ use crate::{
         VerifyStartRequest, VerifySubResponse,
     },
     collect::{EncryptedOutputShare, OutputShare, OutputShareRequest},
+    error::{handle_rejection, IntoHttpApiProblem, ProblemDocumentType},
     hpke::{self, Role},
     merge_vector,
     parameters::{Parameters, TaskId},
-    with_shared_value, IntervalStart, Timestamp,
+    with_shared_value, Interval, Time, Timestamp,
 };
 use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
@@ -33,7 +34,7 @@ pub enum Error {
     #[error("encryption error {0}")]
     Encryption(#[from] crate::hpke::Error),
     #[error("unknown task ID")]
-    UnknownTaskId(TaskId),
+    UnrecognizedTask(TaskId),
     #[error("unknown HPKE config ID {0}")]
     UnknownHpkeConfig(u8),
     #[error("VDAF error {0}")]
@@ -44,14 +45,35 @@ pub enum Error {
     AggregateRequest(StatusCode),
     #[error("bad protocol parameters {0}")]
     Parameters(#[from] crate::parameters::Error),
-    #[error("aggregate protocol error {0}")]
-    AggregateProtocol(String),
     #[error("field error")]
     PrioField(#[from] FieldError),
-    #[error("Insufficient contributions in interval described by collect request: {0}")]
-    InsufficientContributions(u64),
+    #[error("invalid batch interval {0}")]
+    InvalidBatchInterval(Interval),
+    #[error("insufficient batch size {0}")]
+    InsufficientBatchSize(u64),
+    #[error("request exceeds the batch's privacy budget")]
+    PrivacyBudgetExceeded,
     #[error("Length mismatch")]
     LengthMismatch,
+}
+
+impl IntoHttpApiProblem for Error {
+    fn problem_document_type(&self) -> Option<ProblemDocumentType> {
+        match self {
+            Self::JsonParse(_) => Some(ProblemDocumentType::UnrecognizedMessage),
+            // TODO: not all encryption errors will be client errors so we
+            // perhaps need a bool field on Error::Encryption to indicate
+            // client vs. server error
+            Self::Encryption(_) => Some(ProblemDocumentType::UnrecognizedMessage),
+            Self::UnrecognizedTask(_) => Some(ProblemDocumentType::UnrecognizedTask),
+            Self::UnknownHpkeConfig(_) => Some(ProblemDocumentType::OutdatedConfig),
+            Self::Vdaf(_) => Some(ProblemDocumentType::InvalidProof),
+            Self::InvalidBatchInterval(_) => Some(ProblemDocumentType::InvalidBatchInterval),
+            Self::InsufficientBatchSize(_) => Some(ProblemDocumentType::InsufficientBatchSize),
+            Self::PrivacyBudgetExceeded => Some(ProblemDocumentType::PrivacyBudgetExceeded),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -81,7 +103,10 @@ impl Helper {
             // Empty state
             HelperState {
                 accumulators: HashMap::new(),
-                last_timestamp_seen: Timestamp { time: 0, nonce: 0 },
+                last_timestamp_seen: Timestamp {
+                    time: Time(0),
+                    nonce: 0,
+                },
             }
         } else {
             serde_json::from_slice(state_blob)?
@@ -104,7 +129,7 @@ impl Helper {
         );
 
         if request.task_id != self.parameters.task_id {
-            return Err(Error::UnknownTaskId(request.task_id));
+            return Err(Error::UnrecognizedTask(request.task_id));
         }
 
         let mut sub_responses = vec![];
@@ -235,22 +260,14 @@ impl Helper {
             .parameters
             .validate_batch_interval(output_share_request.batch_interval)
         {
-            return Err(Error::AggregateProtocol(
-                "invalid batch interval in request".to_string(),
+            return Err(Error::InvalidBatchInterval(
+                output_share_request.batch_interval,
             ));
         }
 
-        let num_intervals_in_request = (output_share_request.batch_interval.end
-            - output_share_request.batch_interval.start)
-            / self.parameters.min_batch_duration;
-        info!(?num_intervals_in_request, ?output_share_request.batch_interval, self.parameters.min_batch_duration);
-
-        if num_intervals_in_request == 0 {
-            // TODO Is this an error or do we send an empty EncryptedOutputShare?
-            return Err(Error::AggregateProtocol(
-                "batch interval is 0 length".to_string(),
-            ));
-        }
+        let num_intervals_in_request = output_share_request
+            .batch_interval
+            .min_intervals_in_interval(self.parameters.min_batch_duration);
 
         let first_interval = output_share_request
             .batch_interval
@@ -269,10 +286,7 @@ impl Helper {
             match self.helper_state.accumulators.get_mut(&interval_start) {
                 Some(accumulator) => {
                     if accumulator.privacy_budget == self.parameters.max_batch_lifetime {
-                        return Err(Error::AggregateProtocol(format!(
-                            "privacy budget exceeded ({})",
-                            self.parameters.max_batch_lifetime
-                        )));
+                        return Err(Error::PrivacyBudgetExceeded);
                     }
                     match output_sum {
                         Some(ref mut inner_output_sum) => {
@@ -299,7 +313,7 @@ impl Helper {
         }
 
         if total_contributions < self.parameters.min_batch_size {
-            return Err(Error::InsufficientContributions(total_contributions));
+            return Err(Error::InsufficientBatchSize(total_contributions));
         }
 
         let output_share = OutputShare {
@@ -400,6 +414,7 @@ pub async fn run_helper(ppm_parameters: Parameters, hpke_config: hpke::Config) -
     let routes = hpke_config_endpoint
         .or(aggregate)
         .or(output_share)
+        .recover(handle_rejection)
         .with(warp::trace::request());
 
     info!("helper serving on 0.0.0.0:{}", port);

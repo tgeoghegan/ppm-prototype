@@ -2,7 +2,7 @@ use crate::{
     hpke::{self, Role},
     parameters::{Parameters, PrioField, PrioType, ProtocolParameters},
     upload::{EncryptedInputShare, Report},
-    Timestamp,
+    Time, Timestamp,
 };
 use ::hpke::Serializable;
 use color_eyre::eyre::{eyre, Result};
@@ -63,7 +63,7 @@ impl Client {
         // filling in `encrypted_input_shares` later. Maybe impl Default on Report.
         let mut report = Report {
             timestamp: Timestamp {
-                time: 1631907500 + count,
+                time: Time(1631907500 + count),
                 nonce: rand::random(),
             },
             task_id: self.parameters.task_id,

@@ -7,11 +7,12 @@ use crate::{
     collect::{
         CollectRequest, CollectResponse, EncryptedOutputShare, OutputShare, OutputShareRequest,
     },
+    error::{handle_rejection, IntoHttpApiProblem, ProblemDocumentType},
     hpke::{self, Role},
     merge_vector,
     parameters::{Parameters, TaskId},
     upload::{EncryptedInputShare, Report, ReportExtension},
-    with_shared_value, IntervalStart, Timestamp,
+    with_shared_value, Interval, Timestamp,
 };
 use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
@@ -48,8 +49,8 @@ pub enum Error {
     JsonParse(#[from] serde_json::Error),
     #[error("encryption error")]
     Encryption(#[from] crate::hpke::Error),
-    #[error("unknown task ID")]
-    UnknownTaskId(TaskId),
+    #[error("unrecognized task ID")]
+    UnrecognizedTask(TaskId),
     #[error("unknown HPKE config ID {0}")]
     UnknownHpkeConfig(u8),
     #[error("VDAF error")]
@@ -66,12 +67,33 @@ pub enum Error {
     PrioField(#[from] FieldError),
     #[error("Collect HTTP request error {0}")]
     CollectRequest(StatusCode),
-    #[error("collect protocol error {0}")]
-    CollectProtocol(String),
-    #[error("Insufficient contributions in interval described by collect request: {0}")]
-    InsufficientContributions(u64),
+    #[error("invalid batch interval {0}")]
+    InvalidBatchInterval(Interval),
+    #[error("insufficient batch size {0}")]
+    InsufficientBatchSize(u64),
+    #[error("request exceeds the batch's privacy budget")]
+    PrivacyBudgetExceeded,
     #[error("Length mismatch")]
     LengthMismatch,
+}
+
+impl IntoHttpApiProblem for Error {
+    fn problem_document_type(&self) -> Option<ProblemDocumentType> {
+        match self {
+            Self::JsonParse(_) => Some(ProblemDocumentType::UnrecognizedMessage),
+            // TODO: not all encryption errors will be client errors so we
+            // perhaps need a bool field on Error::Encryption to indicate
+            // client vs. server error
+            Self::Encryption(_) => Some(ProblemDocumentType::UnrecognizedMessage),
+            Self::UnrecognizedTask(_) => Some(ProblemDocumentType::UnrecognizedTask),
+            Self::UnknownHpkeConfig(_) => Some(ProblemDocumentType::OutdatedConfig),
+            Self::Vdaf(_) => Some(ProblemDocumentType::InvalidProof),
+            Self::InvalidBatchInterval(_) => Some(ProblemDocumentType::InvalidBatchInterval),
+            Self::InsufficientBatchSize(_) => Some(ProblemDocumentType::InsufficientBatchSize),
+            Self::PrivacyBudgetExceeded => Some(ProblemDocumentType::PrivacyBudgetExceeded),
+            _ => None,
+        }
+    }
 }
 
 /// In-memory representation of an input stored by the leader
@@ -141,7 +163,7 @@ impl Leader {
         if report.task_id != self.parameters.task_id {
             // TODO(timg) construct problem document with type=unrecognizedTask
             // per section 3.1
-            return Err(Error::UnknownTaskId(report.task_id));
+            return Err(Error::UnrecognizedTask(report.task_id));
         }
 
         let leader_share = &report.encrypted_input_shares[Role::Leader.index()];
@@ -339,21 +361,12 @@ impl Leader {
             .parameters
             .validate_batch_interval(collect_request.batch_interval)
         {
-            return Err(Error::CollectProtocol(
-                "invalid batch interval in request".to_string(),
-            ));
+            return Err(Error::InvalidBatchInterval(collect_request.batch_interval));
         }
 
-        let num_intervals_in_request = (collect_request.batch_interval.end
-            - collect_request.batch_interval.start)
-            / self.parameters.min_batch_duration;
-
-        if num_intervals_in_request == 0 {
-            // TODO Is this an error or do we send an empty EncryptedOutputShare?
-            return Err(Error::CollectProtocol(
-                "batch interval is 0 length".to_string(),
-            ));
-        }
+        let num_intervals_in_request = collect_request
+            .batch_interval
+            .min_intervals_in_interval(self.parameters.min_batch_duration);
 
         let output_share_request = OutputShareRequest {
             task_id: collect_request.task_id,
@@ -390,10 +403,7 @@ impl Leader {
             match self.accumulators.get_mut(&interval_start) {
                 Some(accumulator) => {
                     if accumulator.privacy_budget == self.parameters.max_batch_lifetime {
-                        return Err(Error::CollectProtocol(format!(
-                            "privacy budget exceeded ({})",
-                            self.parameters.max_batch_lifetime
-                        )));
+                        return Err(Error::PrivacyBudgetExceeded);
                     }
                     match output_sum {
                         Some(ref mut inner_output_sum) => {
@@ -420,7 +430,7 @@ impl Leader {
         }
 
         if total_contributions < self.parameters.min_batch_size {
-            return Err(Error::InsufficientContributions(total_contributions));
+            return Err(Error::InsufficientBatchSize(total_contributions));
         }
 
         let output_share = OutputShare {
@@ -463,14 +473,12 @@ pub async fn run_leader(ppm_parameters: Parameters, hpke_config: hpke::Config) -
         .and(warp::body::json())
         .and(with_shared_value(leader_aggregator.clone()))
         .and_then(|report: Report, leader: Arc<Mutex<Leader>>| async move {
-            match leader.lock().await.handle_upload(&report).await {
+            let mut leader = leader.lock().await;
+            match leader.handle_upload(&report).await {
                 Ok(()) => Ok(reply::with_status(reply(), StatusCode::OK)),
-                Err(e) => {
-                    error!(error = ?e, "failed to handle upload");
-                    // TODO wire up a type that implements Reject and attach
-                    // a warp reject handler that constructs appropriate responses
-                    Err(warp::reject::not_found())
-                }
+                Err(e) => Err(warp::reject::custom(
+                    e.problem_document(&leader.parameters, "upload"),
+                )),
             }
         })
         .with(warp::trace::named("upload"));
@@ -481,9 +489,12 @@ pub async fn run_leader(ppm_parameters: Parameters, hpke_config: hpke::Config) -
         .and(with_shared_value(leader_aggregator.clone()))
         .and_then(
             |collect_request: CollectRequest, leader: Arc<Mutex<Leader>>| async move {
-                match leader.lock().await.handle_collect(&collect_request).await {
+                let mut leader = leader.lock().await;
+                match leader.handle_collect(&collect_request).await {
                     Ok(response) => Ok(reply::with_status(reply::json(&response), StatusCode::OK)),
-                    Err(_) => Err(warp::reject::not_found()),
+                    Err(e) => Err(warp::reject::custom(
+                        e.problem_document(&leader.parameters, "collect"),
+                    )),
                 }
             },
         )
@@ -492,6 +503,7 @@ pub async fn run_leader(ppm_parameters: Parameters, hpke_config: hpke::Config) -
     let routes = hpke_config_endpoint
         .or(upload)
         .or(collect)
+        .recover(handle_rejection)
         .with(warp::trace::request());
 
     info!("leader serving on 0.0.0.0:{}", port);

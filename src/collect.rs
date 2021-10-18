@@ -4,7 +4,7 @@ use crate::{
     hpke::{self, Role},
     merge_vector,
     parameters::{Parameters, TaskId},
-    Interval,
+    Interval, Time,
 };
 use color_eyre::eyre::{eyre, Result};
 use derivative::Derivative;
@@ -84,8 +84,8 @@ pub async fn run_collect(ppm_parameters: &Parameters, hpke_config: &hpke::Config
     let http_client = Client::builder().user_agent(COLLECTOR_USER_AGENT).build()?;
 
     let batch_interval = Interval {
-        start: 1631907500,
-        end: 1631907500 + 100,
+        start: Time(1631907500),
+        end: Time(1631907500 + 100),
     };
 
     let collect_request = CollectRequest {
@@ -103,7 +103,11 @@ pub async fn run_collect(ppm_parameters: &Parameters, hpke_config: &hpke::Config
     let status = collect_response.status();
     info!(http_status = ?status, "collect request HTTP status");
     if !status.is_success() {
-        return Err(eyre!(format!("collect request failed: {}", status)));
+        return Err(eyre!(format!(
+            "collect request failed: {}\n{}",
+            status,
+            collect_response.text().await.unwrap()
+        )));
     }
 
     let collect_response_body: CollectResponse = collect_response.json().await?;
