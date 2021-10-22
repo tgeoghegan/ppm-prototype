@@ -1,6 +1,6 @@
 use crate::{
     hpke::{self, Role},
-    parameters::{Parameters, PrioField, PrioType, ProtocolParameters},
+    parameters::Parameters,
     upload::{EncryptedInputShare, Report},
     Time, Timestamp,
 };
@@ -58,26 +58,11 @@ impl Client {
         })
     }
 
-    pub async fn do_upload(&self, count: u64, input: Boolean<Field64>) -> Result<()> {
-        // TODO(timg): I don't like partially constructing the Report and then
-        // filling in `encrypted_input_shares` later. Maybe impl Default on Report.
-        let mut report = Report {
-            timestamp: Timestamp {
-                time: Time(1631907500 + count),
-                nonce: rand::random(),
-            },
-            task_id: self.parameters.task_id,
-            extensions: vec![],
-            encrypted_input_shares: vec![],
+    pub async fn do_upload(&self, time: u64, input: Boolean<Field64>) -> Result<()> {
+        let timestamp = Timestamp {
+            time: Time(time),
+            nonce: rand::random(),
         };
-
-        match self.parameters.protocol_parameters {
-            ProtocolParameters::Prio {
-                field: PrioField::Field64,
-                prio_type: PrioType::Boolean,
-            } => (),
-            _ => return Err(eyre!("only Prio is supported")),
-        }
 
         // Generate a Prio input and proof. The serialized format is input share
         // then proof share.
@@ -103,21 +88,27 @@ impl Client {
             .report_sender(&self.parameters.task_id, Role::Helper)?;
 
         let (leader_payload, leader_encapped_key) =
-            leader_hpke_sender.encrypt_input_share(&report, &json_leader_share)?;
+            leader_hpke_sender.encrypt_input_share(timestamp, &json_leader_share)?;
         let (helper_payload, helper_encapped_key) =
-            helper_hpke_sender.encrypt_input_share(&report, &json_helper_share)?;
-        report.encrypted_input_shares = vec![
-            EncryptedInputShare {
-                aggregator_config_id: self.leader_hpke_config.id,
-                encapsulated_context: leader_encapped_key.to_bytes().to_vec(),
-                payload: leader_payload,
-            },
-            EncryptedInputShare {
-                aggregator_config_id: self.helper_hpke_config.id,
-                encapsulated_context: helper_encapped_key.to_bytes().to_vec(),
-                payload: helper_payload,
-            },
-        ];
+            helper_hpke_sender.encrypt_input_share(timestamp, &json_helper_share)?;
+
+        let report = Report {
+            timestamp,
+            task_id: self.parameters.task_id,
+            encrypted_input_shares: vec![
+                EncryptedInputShare {
+                    aggregator_config_id: self.leader_hpke_config.id,
+                    encapsulated_context: leader_encapped_key.to_bytes().to_vec(),
+                    payload: leader_payload,
+                },
+                EncryptedInputShare {
+                    aggregator_config_id: self.helper_hpke_config.id,
+                    encapsulated_context: helper_encapped_key.to_bytes().to_vec(),
+                    payload: helper_payload,
+                },
+            ],
+            extensions: vec![],
+        };
 
         let status = self
             .http_client

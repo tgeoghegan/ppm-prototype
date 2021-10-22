@@ -351,10 +351,10 @@ pub async fn run_helper(ppm_parameters: Parameters, hpke_config: hpke::Config) -
         .and(warp::body::json())
         .and(with_shared_value(ppm_parameters.clone()))
         .and(with_shared_value(hpke_config.clone()))
-        .map(
-            move |aggregate_request: VerifyStartRequest,
-                  ppm_parameters: Parameters,
-                  hpke_config: hpke::Config| {
+        .and_then(
+            |aggregate_request: VerifyStartRequest,
+             ppm_parameters: Parameters,
+             hpke_config: hpke::Config| async move {
                 // We intentionally create a new instance of Helper every time we
                 // handle a request to prove that we can successfully execute the
                 // protocol without maintaining local state
@@ -365,17 +365,17 @@ pub async fn run_helper(ppm_parameters: Parameters, hpke_config: hpke::Config) -
                 ) {
                     Ok(helper) => helper,
                     Err(e) => {
-                        error!(error = ?e, "failed to create helper aggregator with state");
-                        return reply::with_status(reply::json(&()), StatusCode::BAD_REQUEST);
+                        return Err(warp::reject::custom(
+                            e.problem_document(&ppm_parameters, "aggregate"),
+                        ))
                     }
                 };
 
                 match helper_aggregator.handle_aggregate(&aggregate_request) {
-                    Ok(response) => reply::with_status(reply::json(&response), StatusCode::OK),
-                    Err(e) => {
-                        error!(error = ?e, "failed to handle aggregate request");
-                        reply::with_status(reply::json(&()), StatusCode::INTERNAL_SERVER_ERROR)
-                    }
+                    Ok(response) => Ok(reply::with_status(reply::json(&response), StatusCode::OK)),
+                    Err(e) => Err(warp::reject::custom(
+                        e.problem_document(&ppm_parameters, "aggregate"),
+                    )),
                 }
             },
         )
@@ -386,26 +386,28 @@ pub async fn run_helper(ppm_parameters: Parameters, hpke_config: hpke::Config) -
         .and(warp::body::json())
         .and(with_shared_value(ppm_parameters.clone()))
         .and(with_shared_value(hpke_config.clone()))
-        .map(
-            move |output_share_request: OutputShareRequest,
-                  ppm_parameters: Parameters,
-                  hpke_config: hpke::Config| {
+        .and_then(
+            |output_share_request: OutputShareRequest,
+             ppm_parameters: Parameters,
+             hpke_config: hpke::Config| async move {
                 let mut helper_aggregator = match Helper::new(
                     &ppm_parameters,
                     &hpke_config,
                     &output_share_request.helper_state,
                 ) {
                     Ok(helper) => helper,
-                    Err(_) => {
-                        return reply::with_status(reply::json(&()), StatusCode::BAD_REQUEST);
+                    Err(e) => {
+                        return Err(warp::reject::custom(
+                            e.problem_document(&ppm_parameters, "output_share"),
+                        ))
                     }
                 };
 
                 match helper_aggregator.handle_output_share(&output_share_request) {
-                    Ok(response) => reply::with_status(reply::json(&response), StatusCode::OK),
-                    Err(_) => {
-                        reply::with_status(reply::json(&()), StatusCode::INTERNAL_SERVER_ERROR)
-                    }
+                    Ok(response) => Ok(reply::with_status(reply::json(&response), StatusCode::OK)),
+                    Err(e) => Err(warp::reject::custom(
+                        e.problem_document(&ppm_parameters, "output_share"),
+                    )),
                 }
             },
         )

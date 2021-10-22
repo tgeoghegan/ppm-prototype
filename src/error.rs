@@ -13,6 +13,7 @@ pub(crate) enum ProblemDocumentType {
     InvalidBatchInterval,
     InsufficientBatchSize,
     PrivacyBudgetExceeded,
+    HelperError,
     UnknownError,
 }
 
@@ -26,10 +27,11 @@ impl From<ProblemDocumentType> for String {
             ProblemDocumentType::InvalidBatchInterval => "invalidBatchInterval",
             ProblemDocumentType::InsufficientBatchSize => "insufficientBatchSize",
             ProblemDocumentType::PrivacyBudgetExceeded => "privacyBudgetExceeded",
+            ProblemDocumentType::HelperError => "helperError",
             ProblemDocumentType::UnknownError => "unknownError",
         };
 
-        format!("url:ietf:params:ppm:error:{}", problem_type)
+        format!("urn:ietf:params:ppm:error:{}", problem_type)
     }
 }
 
@@ -43,6 +45,10 @@ pub(crate) trait IntoHttpApiProblem: Error {
         ppm_parameters: &Parameters,
         endpoint: &'static str,
     ) -> HttpApiProblem {
+        if let Some(source_document) = self.source_problem_document() {
+            return source_document.clone().instance(endpoint);
+        }
+
         match self.problem_document_type() {
             Some(problem_document_type) => {
                 HttpApiProblem::new(StatusCode::BAD_REQUEST).type_url(problem_document_type)
@@ -55,10 +61,18 @@ pub(crate) trait IntoHttpApiProblem: Error {
         .instance(endpoint)
     }
 
-    /// Get problem document type and detail string for the error, or None for
-    /// errors not captured by any of the PPM protocol's error types, in which
-    /// case a problem document with HTTP status code 500 is constructed.
+    /// Get problem document type for the error, or None for errors not captured
+    /// by any of the PPM protocol's error types, in which case a problem
+    /// document with HTTP status code 500 is constructed.
     fn problem_document_type(&self) -> Option<ProblemDocumentType>;
+
+    /// Implementations may provide an HttpApiProblem representing the cause of
+    /// this problem, which will be returned from [`problem_document`] instead
+    /// of constructing a new problem document, though with the `instance`
+    /// field set.
+    fn source_problem_document(&self) -> Option<&HttpApiProblem> {
+        None
+    }
 }
 
 /// warp rejection handler that can be tacked on to routes to construct a
@@ -69,10 +83,40 @@ pub(crate) async fn handle_rejection(rejection: Rejection) -> Result<impl warp::
     // can't find one.
     let problem_document = rejection.find::<HttpApiProblem>().unwrap();
 
-    Ok(warp::reply::with_status(
-        warp::reply::json(problem_document),
-        problem_document
-            .status
-            .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+    Ok(warp::reply::with_header(
+        warp::reply::with_status(
+            warp::reply::json(problem_document),
+            problem_document
+                .status
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+        ),
+        http::header::CONTENT_TYPE,
+        "application/problem+json",
     ))
+}
+
+/// Returns the problem document encoded into the response's body, if any. If
+/// the body could not be loaded and parsed as a problem document, it is
+/// returned as Err(body).
+pub(crate) async fn response_to_api_problem(
+    response: reqwest::Response,
+) -> Result<HttpApiProblem, String> {
+    // Get the whole response body so that we can put it into the problem
+    // document should parsing it as a JSON problem document fail
+    let response_body = match response.text().await {
+        Ok(text) => text,
+        Err(e) => return Err(format!("could not load response body: {:?}", e)),
+    };
+
+    let problem_document: HttpApiProblem = match serde_json::from_str(&response_body) {
+        Ok(problem_document) => problem_document,
+        Err(_) => {
+            return Err(format!(
+                "response body is not a problem document\n\n{}",
+                response_body
+            ))
+        }
+    };
+
+    Ok(problem_document)
 }

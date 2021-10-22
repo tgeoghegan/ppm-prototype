@@ -4,12 +4,13 @@ use crate::{
     hpke::{self, Role},
     merge_vector,
     parameters::{Parameters, TaskId},
-    Interval, Time,
+    Interval,
 };
-use color_eyre::eyre::{eyre, Result};
 use derivative::Derivative;
+use http::{header::CONTENT_TYPE, StatusCode};
+use http_api_problem::HttpApiProblem;
 use prio::field::{Field64, FieldElement};
-use reqwest::Client;
+use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -26,6 +27,20 @@ pub enum Error {
     JsonParse(#[from] serde_json::error::Error),
     #[error("encryption error")]
     Encryption(#[from] crate::hpke::Error),
+    #[error("HTTP problem document {0}")]
+    ProblemDocument(HttpApiProblem),
+    #[error("HTTP response status {0} body:\n{1:?}")]
+    HttpFailure(StatusCode, Option<Response>),
+    #[error("lengths do not match: leader {0} helper {1}")]
+    LengthMismatch(u64, u64),
+    #[error("reqwest error")]
+    Reqwest(#[from] reqwest::Error),
+    #[error("parameters")]
+    Parameters(#[from] crate::parameters::Error),
+    #[error("field error")]
+    Field(#[from] prio::field::FieldError),
+    #[error("{0}")]
+    Unspecified(&'static str),
 }
 
 /// A collect request sent to a leader from a collector.
@@ -33,8 +48,8 @@ pub enum Error {
 pub struct CollectRequest {
     pub task_id: TaskId,
     pub batch_interval: Interval,
-    #[serde(flatten)]
-    pub protocol_parameters: ProtocolCollectFields,
+    #[serde(skip_serializing_if = "Option::is_none", rename = "aggregation_param")]
+    pub aggregation_parameter: Option<Vec<u8>>,
 }
 
 /// The protocol specific portions of CollectRequest
@@ -80,18 +95,17 @@ pub struct EncryptedOutputShare {
     pub payload: Vec<u8>,
 }
 
-pub async fn run_collect(ppm_parameters: &Parameters, hpke_config: &hpke::Config) -> Result<()> {
+pub async fn run_collect(
+    ppm_parameters: &Parameters,
+    hpke_config: &hpke::Config,
+    batch_interval: Interval,
+) -> Result<Vec<Field64>, Error> {
     let http_client = Client::builder().user_agent(COLLECTOR_USER_AGENT).build()?;
-
-    let batch_interval = Interval {
-        start: Time(1631907500),
-        end: Time(1631907500 + 100),
-    };
 
     let collect_request = CollectRequest {
         task_id: ppm_parameters.task_id,
         batch_interval,
-        protocol_parameters: ProtocolCollectFields::Prio {},
+        aggregation_parameter: None,
     };
 
     let collect_response = http_client
@@ -103,11 +117,15 @@ pub async fn run_collect(ppm_parameters: &Parameters, hpke_config: &hpke::Config
     let status = collect_response.status();
     info!(http_status = ?status, "collect request HTTP status");
     if !status.is_success() {
-        return Err(eyre!(format!(
-            "collect request failed: {}\n{}",
-            status,
-            collect_response.text().await.unwrap()
-        )));
+        match collect_response.headers().get(CONTENT_TYPE) {
+            Some(content_type) if content_type == "application/problem+json" => {
+                match collect_response.json().await {
+                    Ok(problem_document) => return Err(Error::ProblemDocument(problem_document)),
+                    Err(_) => return Err(Error::HttpFailure(status, None)),
+                }
+            }
+            _ => return Err(Error::HttpFailure(status, Some(collect_response))),
+        }
     }
 
     let collect_response_body: CollectResponse = collect_response.json().await?;
@@ -134,23 +152,16 @@ pub async fn run_collect(ppm_parameters: &Parameters, hpke_config: &hpke::Config
         )?)?;
 
     if decrypted_leader_share.contributions != decrypted_helper_share.contributions {
-        return Err(eyre!(format!(
-            "mismatched contribution counts between helper and leader: {} / {}",
-            decrypted_leader_share.contributions, decrypted_helper_share.contributions
-        )));
+        return Err(Error::LengthMismatch(
+            decrypted_leader_share.contributions,
+            decrypted_helper_share.contributions,
+        ));
     }
 
     let mut leader_share = Field64::byte_slice_into_vec(&decrypted_leader_share.sum)?;
     let helper_share = Field64::byte_slice_into_vec(&decrypted_helper_share.sum)?;
 
-    merge_vector(&mut leader_share, &helper_share)
-        .map_err(|e| eyre!(format!("failed to merge: {}", e)))?;
+    merge_vector(&mut leader_share, &helper_share).map_err(Error::Unspecified)?;
 
-    info!(aggregate = ?leader_share, "reassembled aggregate");
-
-    if !leader_share.first().unwrap().eq(&Field64::from(100)) {
-        return Err(eyre!("unexpected aggregation"));
-    }
-
-    Ok(())
+    Ok(leader_share)
 }

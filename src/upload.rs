@@ -30,18 +30,6 @@ impl Report {
     pub fn from_json_reader<R: Read>(reader: R) -> Result<Self, Error> {
         Ok(serde_json::from_reader(reader)?)
     }
-
-    /// Construct associated data string suitable for HPKE encryption or
-    /// decryption of an EncryptedInputShare
-    pub(crate) fn associated_data(&self) -> Vec<u8> {
-        // Associated data is time || nonce || extensions, input_share per
-        // §4.2.2. In TLS presentation language, multi-byte values are
-        // represented in network or big endian order. At the moment we use JSON
-        // on the wire, but abide by TLS rules here.
-        // https://datatracker.ietf.org/doc/html/rfc8446#section-3.1
-        // TODO(timg) include upload extensions in AAD
-        self.timestamp.associated_data()
-    }
 }
 
 /// An extension to a `Report`, allowing clients to tunnel arbitrary information

@@ -23,7 +23,7 @@ use warp::Filter;
 
 /// Seconds elapsed since start of UNIX epoch
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
-pub struct Time(u64);
+pub struct Time(pub u64);
 
 impl Time {
     /// Determine the start of the aggregation window that this report falls in,

@@ -7,7 +7,7 @@ use crate::{
     collect::{
         CollectRequest, CollectResponse, EncryptedOutputShare, OutputShare, OutputShareRequest,
     },
-    error::{handle_rejection, IntoHttpApiProblem, ProblemDocumentType},
+    error::{handle_rejection, response_to_api_problem, IntoHttpApiProblem, ProblemDocumentType},
     hpke::{self, Role},
     merge_vector,
     parameters::{Parameters, TaskId},
@@ -18,6 +18,7 @@ use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
 use color_eyre::eyre::Result;
 use http::StatusCode;
+use http_api_problem::HttpApiProblem;
 use prio::{
     field::{Field64, FieldElement, FieldError},
     pcp::{types::Boolean, Value},
@@ -57,16 +58,16 @@ pub enum Error {
     Vdaf(#[from] VdafError),
     #[error("HTTP client error")]
     HttpClient(#[from] reqwest::Error),
-    #[error("Aggregate HTTP request error {0}")]
-    AggregateRequest(StatusCode),
+    #[error("{1}")]
+    HelperHttpRequest(StatusCode, String),
     #[error("bad protocol parameters")]
     Parameters(#[from] crate::parameters::Error),
     #[error("aggregate protocol error {0}")]
     AggregateProtocol(String),
     #[error("field error")]
     PrioField(#[from] FieldError),
-    #[error("Collect HTTP request error {0}")]
-    CollectRequest(StatusCode),
+    #[error("helper error")]
+    HelperError(#[source] HttpApiProblem),
     #[error("invalid batch interval {0}")]
     InvalidBatchInterval(Interval),
     #[error("insufficient batch size {0}")]
@@ -91,7 +92,17 @@ impl IntoHttpApiProblem for Error {
             Self::InvalidBatchInterval(_) => Some(ProblemDocumentType::InvalidBatchInterval),
             Self::InsufficientBatchSize(_) => Some(ProblemDocumentType::InsufficientBatchSize),
             Self::PrivacyBudgetExceeded => Some(ProblemDocumentType::PrivacyBudgetExceeded),
+            Self::HelperError(_) => Some(ProblemDocumentType::HelperError),
+            Self::HelperHttpRequest(_, _) => Some(ProblemDocumentType::HelperError),
             _ => None,
+        }
+    }
+
+    fn source_problem_document(&self) -> Option<&HttpApiProblem> {
+        if let Self::HelperError(problem_document) = self {
+            Some(problem_document)
+        } else {
+            None
         }
     }
 }
@@ -161,16 +172,12 @@ impl Leader {
     #[tracing::instrument(skip(self, report), err)]
     pub async fn handle_upload(&mut self, report: &Report) -> Result<(), Error> {
         if report.task_id != self.parameters.task_id {
-            // TODO(timg) construct problem document with type=unrecognizedTask
-            // per section 3.1
             return Err(Error::UnrecognizedTask(report.task_id));
         }
 
         let leader_share = &report.encrypted_input_shares[Role::Leader.index()];
 
         if leader_share.aggregator_config_id != self.hpke_config.id {
-            // TODO(timg) construct problem document with type=outdatedConfig
-            // per section 3.1
             return Err(Error::UnknownHpkeConfig(leader_share.aggregator_config_id));
         }
 
@@ -256,9 +263,13 @@ impl Leader {
             .json(&aggregate_request)
             .send()
             .await?;
+        let http_response_status = http_response.status();
 
-        if !http_response.status().is_success() {
-            return Err(Error::AggregateRequest(http_response.status()));
+        if !http_response_status.is_success() {
+            return match response_to_api_problem(http_response).await {
+                Ok(document) => Err(Error::HelperError(document)),
+                Err(message) => Err(Error::HelperHttpRequest(http_response_status, message)),
+            };
         }
 
         // At this point we got an HTTP 200 OK from helper, meaning it
@@ -380,9 +391,13 @@ impl Leader {
             .json(&output_share_request)
             .send()
             .await?;
+        let http_response_status = http_response.status();
 
-        if !http_response.status().is_success() {
-            return Err(Error::CollectRequest(http_response.status()));
+        if !http_response_status.is_success() {
+            return match response_to_api_problem(http_response).await {
+                Ok(document) => Err(Error::HelperError(document)),
+                Err(message) => Err(Error::HelperHttpRequest(http_response_status, message)),
+            };
         }
 
         let helper_encrypted_output_share: EncryptedOutputShare = http_response.json().await?;
