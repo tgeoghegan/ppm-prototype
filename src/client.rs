@@ -10,7 +10,10 @@ use http::StatusCode;
 use prio::{
     field::Field64,
     pcp::types::Boolean,
-    vdaf::{prio3_input, suite::Suite},
+    vdaf::{
+        prio3_input,
+        suite::{Key, Suite},
+    },
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +39,8 @@ pub struct Client {
     parameters: Parameters,
     leader_hpke_config: hpke::Config,
     helper_hpke_config: hpke::Config,
+    pub tamper_with_helper_proof: bool,
+    pub tamper_with_leader_proof: bool,
 }
 
 impl Client {
@@ -55,6 +60,8 @@ impl Client {
             parameters: ppm_parameters.clone(),
             leader_hpke_config,
             helper_hpke_config,
+            tamper_with_helper_proof: false,
+            tamper_with_leader_proof: false,
         })
     }
 
@@ -66,7 +73,19 @@ impl Client {
 
         // Generate a Prio input and proof. The serialized format is input share
         // then proof share.
-        let upload_messages = prio3_input(Suite::Aes128CtrHmacSha256, &input, 2)?;
+        let mut upload_messages = prio3_input(Suite::Aes128CtrHmacSha256, &input, 2)?;
+
+        // If requested, tamper with joint randomness seed hint, which will
+        // cause proof verification to fail
+        if self.tamper_with_leader_proof {
+            upload_messages[Role::Leader.index()].joint_rand_seed_hint =
+                Key::generate(Suite::Aes128CtrHmacSha256)?;
+        }
+
+        if self.tamper_with_helper_proof {
+            upload_messages[Role::Helper.index()].joint_rand_seed_hint =
+                Key::generate(Suite::Aes128CtrHmacSha256)?;
+        }
 
         // `Report.EncryptedInputShare.payload` is the encryption of a serialized
         // Prio `Upload[Message]`. Eventually we will implement serialization to

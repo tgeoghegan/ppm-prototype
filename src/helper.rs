@@ -67,7 +67,6 @@ impl IntoHttpApiProblem for Error {
             Self::Encryption(_) => Some(ProblemDocumentType::UnrecognizedMessage),
             Self::UnrecognizedTask(_) => Some(ProblemDocumentType::UnrecognizedTask),
             Self::UnknownHpkeConfig(_) => Some(ProblemDocumentType::OutdatedConfig),
-            Self::Vdaf(_) => Some(ProblemDocumentType::InvalidProof),
             Self::InvalidBatchInterval(_) => Some(ProblemDocumentType::InvalidBatchInterval),
             Self::InsufficientBatchSize(_) => Some(ProblemDocumentType::InsufficientBatchSize),
             Self::PrivacyBudgetExceeded => Some(ProblemDocumentType::PrivacyBudgetExceeded),
