@@ -2,13 +2,12 @@
 
 use crate::{
     aggregate::{
-        boolean_verify_parameter, dump_accumulators, Accumulator, VerifyResponse,
-        VerifyStartRequest, VerifySubResponse,
+        dump_accumulators, prio3_verify_parameter, Accumulator, VerifyResponse, VerifyStartRequest,
+        VerifySubResponse,
     },
     collect::{EncryptedOutputShare, OutputShare, OutputShareRequest},
     error::{handle_rejection, IntoHttpApiProblem, ProblemDocumentType},
     hpke::{self, Role},
-    merge_vector,
     parameters::{Parameters, TaskId},
     with_shared_value, Interval, Time, Timestamp,
 };
@@ -16,11 +15,7 @@ use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
 use color_eyre::eyre::Result;
 use http::StatusCode;
-use prio::{
-    field::{Field64, FieldElement, FieldError},
-    pcp::{types::Boolean, Value},
-    vdaf::{prio3_finish, prio3_start, InputShareMessage, VdafError, VerifyMessage},
-};
+use prio::vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregator, Vdaf, VdafError};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
@@ -45,8 +40,6 @@ pub enum Error {
     AggregateRequest(StatusCode),
     #[error("bad protocol parameters {0}")]
     Parameters(#[from] crate::parameters::Error),
-    #[error("field error")]
-    PrioField(#[from] FieldError),
     #[error("invalid batch interval {0}")]
     InvalidBatchInterval(Interval),
     #[error("insufficient batch size {0}")]
@@ -55,6 +48,8 @@ pub enum Error {
     PrivacyBudgetExceeded,
     #[error("Length mismatch")]
     LengthMismatch,
+    #[error("Unspecified: {0}")]
+    Unspecified(String),
 }
 
 impl IntoHttpApiProblem for Error {
@@ -76,8 +71,8 @@ impl IntoHttpApiProblem for Error {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-struct HelperState {
-    accumulators: HashMap<DateTime<Utc>, Accumulator>,
+struct HelperState<S> {
+    accumulators: HashMap<DateTime<Utc>, Accumulator<S>>,
     last_timestamp_seen: Timestamp,
 }
 
@@ -86,7 +81,9 @@ struct HelperState {
 pub struct Helper {
     parameters: Parameters,
     hpke_config: hpke::Config,
-    helper_state: HelperState,
+    // TODO make Helper generic over Vdaf of has-a `Box<dyn Vdaf>`
+    vdaf: Prio3Sum64,
+    helper_state: HelperState<<Prio3Sum64 as Vdaf>::OutputShare>,
 }
 
 impl Helper {
@@ -98,8 +95,9 @@ impl Helper {
     ) -> Result<Self, Error> {
         // TODO(timg): encrypt helper state to protect it from leader and put
         // some kind of anti-replay token in there
-        let helper_state: HelperState = if state_blob.is_empty() {
-            // Empty state
+        let helper_state: HelperState<<Prio3Sum64 as Vdaf>::OutputShare> = if state_blob.is_empty()
+        {
+            // Start with empty state
             HelperState {
                 accumulators: HashMap::new(),
                 last_timestamp_seen: Timestamp {
@@ -113,6 +111,7 @@ impl Helper {
         Ok(Self {
             parameters: parameters.clone(),
             hpke_config: hpke_config.clone(),
+            vdaf: Prio3Sum64::new(Suite::Blake3, 2, 63)?,
             helper_state,
         })
     }
@@ -168,23 +167,27 @@ impl Helper {
                 &sub_request.timestamp.associated_data(),
             )?;
 
-            let input_share_message: InputShareMessage<Field64> =
+            // TODO make this generic over Vdaf
+            let input_share_message: <Prio3Sum64 as Vdaf>::InputShare =
                 serde_json::from_slice(&decrypted_input_share)?;
 
-            // Construct helper verifier message
-            let (state, helper_verifier_message) = prio3_start::<Boolean<Field64>>(
-                &boolean_verify_parameter(Role::Helper),
+            let state = self.vdaf.prepare_init(
+                &prio3_verify_parameter(Role::Helper),
+                &(),
                 &sub_request.timestamp.associated_data(),
-                input_share_message,
+                &input_share_message,
             )?;
 
-            let leader_verifier_message: VerifyMessage<Field64> =
+            // Construct helper verifier message
+            let (state, helper_verifier_message) = self.vdaf.prepare_start(state)?;
+
+            let leader_verifier_message: <Prio3Sum64 as Aggregator>::PrepareMessage =
                 serde_json::from_slice(&sub_request.verify_message)?;
 
             info!(
                 timestamp = ?sub_request.timestamp,
                 leader_verifier_message = ?leader_verifier_message,
-                helper_verifier_message = ?state,
+                helper_verifier_message = ?helper_verifier_message,
                 "verifying proof"
             );
 
@@ -192,12 +195,9 @@ impl Helper {
             // shares: taking Vec<VerifierMessage> instead of &[VerifierMessage]
             // forces allocation + copy to the heap, even if I own the value of
             // leader_verifier_message, and it's not clear that I do.
-            match prio3_finish(
+            match self.vdaf.prepare_finish(
                 state,
-                [
-                    leader_verifier_message.clone(),
-                    helper_verifier_message.clone(),
-                ],
+                [leader_verifier_message, helper_verifier_message.clone()],
             ) {
                 Ok(input_share) => {
                     // Proof is OK. Accumulate this share and send helper
@@ -208,8 +208,8 @@ impl Helper {
                         .time
                         .interval_start(self.parameters.min_batch_duration);
                     if let Some(sum) = self.helper_state.accumulators.get_mut(&interval_start) {
-                        merge_vector(&mut sum.accumulated, input_share.as_slice())
-                            .map_err(|_| Error::LengthMismatch)?;
+                        self.vdaf
+                            .accumulate(&(), &mut sum.accumulated, &input_share)?;
                         sum.contributions += 1;
                     } else {
                         // This is the first input we have seen for this batch interval.
@@ -217,7 +217,7 @@ impl Helper {
                         self.helper_state.accumulators.insert(
                             interval_start,
                             Accumulator {
-                                accumulated: input_share.as_slice().to_vec(),
+                                accumulated: input_share,
                                 contributions: 1,
                                 privacy_budget: 0,
                             },
@@ -273,7 +273,7 @@ impl Helper {
             .start
             .interval_start(self.parameters.min_batch_duration);
 
-        let mut output_sum: Option<Vec<Field64>> = None;
+        let mut output_shares = vec![];
         let mut total_contributions = 0;
 
         for i in 0..num_intervals_in_request {
@@ -287,15 +287,7 @@ impl Helper {
                     if accumulator.privacy_budget == self.parameters.max_batch_lifetime {
                         return Err(Error::PrivacyBudgetExceeded);
                     }
-                    match output_sum {
-                        Some(ref mut inner_output_sum) => {
-                            // merge in subsequent accumulators
-                            merge_vector(inner_output_sum, &accumulator.accumulated)
-                                .map_err(|_| Error::LengthMismatch)?;
-                        }
-                        // Initialize output sum with first non-empty accumulator
-                        None => output_sum = Some(accumulator.accumulated.clone()),
-                    }
+                    output_shares.push(accumulator.accumulated.clone());
 
                     accumulator.privacy_budget += 1;
                     total_contributions += accumulator.contributions;
@@ -316,7 +308,7 @@ impl Helper {
         }
 
         let output_share = OutputShare {
-            sum: Field64::slice_into_byte_vec(&output_sum.unwrap()),
+            sum: self.vdaf.aggregate(&(), output_shares)?,
             contributions: total_contributions,
         };
 

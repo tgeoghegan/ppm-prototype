@@ -45,8 +45,8 @@ pub struct Parameters {
     pub min_batch_size: u64,
     /// Minimum time elapsed between start and end of a batch
     pub min_batch_duration: Duration,
-    #[serde(flatten)]
-    pub protocol_parameters: ProtocolParameters,
+    /// What VDAF are we running
+    pub vdaf: VdafLabel,
 }
 
 impl Parameters {
@@ -160,34 +160,14 @@ mod base64 {
     }
 }
 
-/// The protocol specific portions of Parameters
+/// VDAFs supported. Each entry should correspond to a VDAF instantiation in
+/// libprio
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub enum ProtocolParameters {
-    /// Prio-specific parameters
-    Prio {
-        field: PrioField,
-        // `type` is a reserved keyword in Rust
-        #[serde(rename = "type")]
-        prio_type: PrioType,
-    },
-    Hits {},
-}
-
-/// Field sizes for use in Prio types. These correspond to types in
-/// prio::pcp::field.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub enum PrioField {
-    Field64,
-    Field80,
-    Field126,
-}
-
-/// Types for use in Prio. These correspond to types in prio::pcp::types.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub enum PrioType {
-    Boolean,
-    MeanVarUnsignedVector { bits: usize },
-    PolyCheckedVector { start: usize, end: usize },
+pub enum VdafLabel {
+    Prio3Count64,
+    Prio3Sum64 { bits: u32 },
+    Prio3Histogram64 { buckets: Vec<u64> },
+    Hits,
 }
 
 #[cfg(test)]
@@ -224,10 +204,7 @@ mod tests {
             max_batch_lifetime: 1,
             min_batch_size: 100,
             min_batch_duration: 100000,
-            protocol_parameters: ProtocolParameters::Prio {
-                field: PrioField::Field80,
-                prio_type: PrioType::PolyCheckedVector { start: 0, end: 2 },
-            },
+            vdaf: VdafLabel::Prio3Sum64 { bits: 64 },
         };
 
         let json_string = r#"
@@ -248,13 +225,9 @@ mod tests {
     "max_batch_lifetime": 1,
     "min_batch_size": 100,
     "min_batch_duration": 100000,
-    "Prio": {
-        "field": "Field80",
-        "type": {
-            "PolyCheckedVector": {
-                "start": 0,
-                "end": 2
-            }
+    "vdaf": {
+        "Prio3Sum64": {
+            "bits": 64
         }
     }
 }

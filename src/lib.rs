@@ -11,7 +11,6 @@ pub mod upload;
 
 use chrono::{DateTime, DurationRound, TimeZone, Utc};
 use directories::ProjectDirs;
-use prio::field::FieldElement;
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
@@ -115,26 +114,10 @@ pub(crate) fn config_path() -> PathBuf {
     project_path.config_dir().to_path_buf()
 }
 
-// Injects a clone of the provided value into the warp filter, making it
-// available to the filter's map() or and_then() handler.
+/// Injects a clone of the provided value into the warp filter, making it
+/// available to the filter's map() or and_then() handler.
 pub fn with_shared_value<T: Clone + Sync + Send>(
     value: T,
 ) -> impl Filter<Extract = (T,), Error = Infallible> + Clone {
     warp::any().map(move || value.clone())
-}
-
-/// Sums `other_vector` into `accumulator`, iff they have the same length.
-/// Returns Ok(()) if the vectors were merged, Err otherwise.
-pub fn merge_vector<F: FieldElement>(
-    accumulator: &mut [F],
-    other_vector: &[F],
-) -> Result<(), &'static str> {
-    if accumulator.len() != other_vector.len() {
-        return Err("vector length mismatch");
-    }
-    for (a, o) in accumulator.iter_mut().zip(other_vector.iter()) {
-        *a += *o;
-    }
-
-    Ok(())
 }

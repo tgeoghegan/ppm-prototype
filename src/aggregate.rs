@@ -6,22 +6,17 @@ use crate::{
     Timestamp,
 };
 use chrono::{DateTime, Utc};
-use prio::{
-    field::Field64,
-    pcp::types::Boolean,
-    vdaf::{suite::Key, VerifyParam},
-};
+use prio::vdaf::{prio3::Prio3VerifyParam, suite::Key};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Debug};
 use tracing::info;
 
-/// Returns a fixed vector of randomness to be used in Boolean<Field64> values,
+/// Returns a fixed vector of randomness to be used in the Prio3 VDAF,
 /// in anticipation of cjpatton working out how aggregators will negotiate
 /// query randomness.
-pub(crate) fn boolean_verify_parameter(role: crate::hpke::Role) -> VerifyParam<Boolean<Field64>> {
-    VerifyParam {
-        value_param: (),
-        query_rand_init: Key::Aes128CtrHmacSha256([1; 32]),
+pub(crate) fn prio3_verify_parameter(role: crate::hpke::Role) -> Prio3VerifyParam {
+    Prio3VerifyParam {
+        query_rand_init: Key::Blake3([1; 32]),
         aggregator_id: role.index() as u8,
     }
 }
@@ -70,9 +65,9 @@ pub struct VerifySubResponse {
 
 /// Accumulator for some aggregation interval
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct Accumulator {
-    /// The value accumulated thus far
-    pub(crate) accumulated: Vec<Field64>,
+pub(crate) struct Accumulator<S> {
+    /// The value accumulated thus far. S will be some VDAF's OutputShare type.
+    pub(crate) accumulated: S,
     /// How many contributions are included
     pub(crate) contributions: u64,
     /// Privacy budget for the aggregation interval. Measured in number of
@@ -80,7 +75,7 @@ pub(crate) struct Accumulator {
     pub(crate) privacy_budget: u64,
 }
 
-pub(crate) fn dump_accumulators(accumulators: &HashMap<DateTime<Utc>, Accumulator>) {
+pub(crate) fn dump_accumulators<S: Debug>(accumulators: &HashMap<DateTime<Utc>, Accumulator<S>>) {
     for (interval_start, accumulated) in accumulators {
         info!(
             interval_start = ?interval_start,

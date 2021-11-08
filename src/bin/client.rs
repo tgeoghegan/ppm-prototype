@@ -1,6 +1,5 @@
 use color_eyre::eyre::{Context, Result};
-use ppm_prototype::{client::Client, parameters::Parameters, trace};
-use prio::{field::Field64, pcp::types::Boolean};
+use ppm_prototype::{client::PpmClient, parameters::Parameters, trace};
 use tracing::info;
 
 #[tokio::main]
@@ -11,12 +10,10 @@ async fn main() -> Result<()> {
 
     let ppm_parameters = Parameters::from_config_file().wrap_err("loading task parameters")?;
 
-    let client = Client::new(&ppm_parameters).await?;
+    let client = PpmClient::new(&ppm_parameters).await?;
 
     for count in 0..100 {
-        client
-            .do_upload(1631907500 + count, Boolean::<Field64>::new(true))
-            .await?;
+        client.do_upload(1631907500 + count, 1).await?;
     }
 
     info!("completed uploads");

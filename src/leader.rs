@@ -1,15 +1,14 @@
 //! Leader implementation
 use crate::{
     aggregate::{
-        boolean_verify_parameter, dump_accumulators, Accumulator, VerifyResponse,
-        VerifyStartRequest, VerifyStartSubRequest,
+        dump_accumulators, prio3_verify_parameter, Accumulator, VerifyResponse, VerifyStartRequest,
+        VerifyStartSubRequest,
     },
     collect::{
         CollectRequest, CollectResponse, EncryptedOutputShare, OutputShare, OutputShareRequest,
     },
     error::{handle_rejection, response_to_api_problem, IntoHttpApiProblem, ProblemDocumentType},
     hpke::{self, Role},
-    merge_vector,
     parameters::{Parameters, TaskId},
     upload::{EncryptedInputShare, Report, ReportExtension},
     with_shared_value, Interval, Timestamp,
@@ -20,9 +19,8 @@ use color_eyre::eyre::Result;
 use http::StatusCode;
 use http_api_problem::HttpApiProblem;
 use prio::{
-    field::{Field64, FieldElement, FieldError},
-    pcp::{types::Boolean, Value},
-    vdaf::{prio3_finish, prio3_start, InputShareMessage, VdafError, VerifyMessage, VerifyState},
+    field::FieldError,
+    vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregator, Vdaf, VdafError},
 };
 use reqwest::Client;
 use std::{
@@ -33,7 +31,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::Mutex;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 use warp::{reply, Filter};
 
 static LEADER_USER_AGENT: &str = concat!(
@@ -108,50 +106,50 @@ impl IntoHttpApiProblem for Error {
 
 /// In-memory representation of an input stored by the leader
 #[derive(Clone, Debug)]
-pub struct StoredInputShare<F: FieldElement, V: Value<Field = F>> {
+pub struct StoredInputShare<A: Aggregator> {
     pub timestamp: Timestamp,
-    pub leader_state: VerifyState<V>,
-    pub leader_verifier_message: VerifyMessage<F>,
+    pub leader_state: A::PrepareStep,
+    pub leader_verifier_message: A::PrepareMessage,
     pub encrypted_helper_share: EncryptedInputShare,
     pub extensions: Vec<ReportExtension>,
 }
 
-impl<F: FieldElement, V: Value<Field = F>> PartialEq for StoredInputShare<F, V> {
+impl<A: Aggregator> PartialEq for StoredInputShare<A> {
     fn eq(&self, other: &Self) -> bool {
         self.timestamp.eq(&other.timestamp)
     }
 }
 
-impl<F: FieldElement, V: Value<Field = F>> Eq for StoredInputShare<F, V> {}
+impl<A: Aggregator> Eq for StoredInputShare<A> {}
 
-impl<F: FieldElement, V: Value<Field = F>> Ord for StoredInputShare<F, V> {
+impl<A: Aggregator> Ord for StoredInputShare<A> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.timestamp.cmp(&other.timestamp)
     }
 }
 
-impl<F: FieldElement, V: Value<Field = F>> PartialOrd for StoredInputShare<F, V> {
+impl<A: Aggregator> PartialOrd for StoredInputShare<A> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
 /// Implements endpoints the leader supports and tracks leader state.
-// TODO(timg): this should be generic in <F: FieldElement, V: Value<F>>, but I
-// don't yet know how to deal with the V::Param argument to `verify_start`
 #[derive(Clone, Debug)]
 pub struct Leader {
     parameters: Parameters,
     hpke_config: hpke::Config,
+    // TODO make Leader generic over Vdaf
+    vdaf: Prio3Sum64,
     /// Inputs for which the leader has not yet received a VerifierMessage from
     /// the helper (though the leader may have already _sent_ a
     /// VerifierMessage). The vec is kept sorted so that the helper shares and
     /// verifier messages can be sent to helper in increasing order per RFCXXXX
     /// 4.3.1.
-    unaggregated_inputs: Vec<StoredInputShare<Field64, Boolean<Field64>>>,
+    unaggregated_inputs: Vec<StoredInputShare<Prio3Sum64>>,
     /// Accumulated sums over inputs that have been verified in conjunction with
     /// the helper. The key is the start of the batch window.
-    accumulators: HashMap<DateTime<Utc>, Accumulator>,
+    accumulators: HashMap<DateTime<Utc>, Accumulator<<Prio3Sum64 as Vdaf>::OutputShare>>,
     helper_state: Vec<u8>,
     http_client: Client,
 }
@@ -161,6 +159,8 @@ impl Leader {
         Ok(Self {
             parameters: parameters.clone(),
             hpke_config: hpke_config.clone(),
+            // TODO make leader generic over Vdaf
+            vdaf: Prio3Sum64::new(Suite::Blake3, 2, 63)?,
             unaggregated_inputs: vec![],
             accumulators: HashMap::new(),
             helper_state: vec![],
@@ -170,6 +170,8 @@ impl Leader {
 
     #[tracing::instrument(skip(self, report), err)]
     pub async fn handle_upload(&mut self, report: &Report) -> Result<(), Error> {
+        debug!(?report, "obtained report");
+
         if report.task_id != self.parameters.task_id {
             return Err(Error::UnrecognizedTask(report.task_id));
         }
@@ -191,20 +193,23 @@ impl Leader {
         let decrypted_input_share = hpke_recipient
             .decrypt_input_share(leader_share, &report.timestamp.associated_data())?;
 
-        let input_share_message: InputShareMessage<Field64> =
+        let input_share_message: <Prio3Sum64 as Vdaf>::InputShare =
             serde_json::from_slice(&decrypted_input_share)?;
 
-        // We use the report timestamp as the VDAF nonce
-        let (state, verifier) = prio3_start::<Boolean<Field64>>(
-            &boolean_verify_parameter(Role::Leader),
+        let state = self.vdaf.prepare_init(
+            &prio3_verify_parameter(Role::Leader),
+            &(),
             &report.timestamp.associated_data(),
-            input_share_message,
+            &input_share_message,
         )?;
+
+        // Construct leader verifier message
+        let (state, leader_verifier_message) = self.vdaf.prepare_start(state)?;
 
         self.unaggregated_inputs.push(StoredInputShare {
             timestamp: report.timestamp,
             leader_state: state,
-            leader_verifier_message: verifier,
+            leader_verifier_message,
             encrypted_helper_share: report.encrypted_input_shares[Role::Helper.index()].clone(),
             extensions: report.extensions.clone(),
         });
@@ -212,9 +217,7 @@ impl Leader {
         // inserts
         self.unaggregated_inputs.sort_unstable();
 
-        info!(?report, "obtained report");
-
-        // Once we have 100 unaggregated inputs, send an aggregate request to
+        // Once we have 10 unaggregated inputs, send an aggregate request to
         // helper
         // TODO configure the threshold
         // TODO don't block upload requests on a synchronous aggregate txn
@@ -301,7 +304,8 @@ impl Leader {
                 )));
             }
 
-            let helper_verifier_message: VerifyMessage<Field64> =
+            // TODO: make this generic over Vdaf
+            let helper_verifier_message: <Prio3Sum64 as Aggregator>::PrepareMessage =
                 serde_json::from_slice(&helper_response.verification_message)?;
 
             let interval_start = leader_input
@@ -316,7 +320,7 @@ impl Leader {
                 "verifying proof"
             );
 
-            let input_share = match prio3_finish(
+            let input_share = match self.vdaf.prepare_finish(
                 leader_input.leader_state,
                 [
                     helper_verifier_message,
@@ -338,8 +342,8 @@ impl Leader {
             // Proof checked out -- sum the input share into the accumulator for
             // the batch interval corresponding to the report timestamp.
             if let Some(sum) = self.accumulators.get_mut(&interval_start) {
-                merge_vector(&mut sum.accumulated, input_share.as_slice())
-                    .map_err(|_| Error::LengthMismatch)?;
+                self.vdaf
+                    .accumulate(&(), &mut sum.accumulated, &input_share)?;
                 sum.contributions += 1;
             } else {
                 // This is the first input we have seen for this batch interval.
@@ -347,7 +351,7 @@ impl Leader {
                 self.accumulators.insert(
                     interval_start,
                     Accumulator {
-                        accumulated: input_share.as_slice().to_vec(),
+                        accumulated: input_share,
                         contributions: 1,
                         privacy_budget: 0,
                     },
@@ -406,7 +410,7 @@ impl Leader {
             .start
             .interval_start(self.parameters.min_batch_duration);
 
-        let mut output_sum: Option<Vec<Field64>> = None;
+        let mut output_shares = vec![];
         let mut total_contributions = 0;
 
         for i in 0..num_intervals_in_request {
@@ -419,15 +423,7 @@ impl Leader {
                     if accumulator.privacy_budget == self.parameters.max_batch_lifetime {
                         return Err(Error::PrivacyBudgetExceeded);
                     }
-                    match output_sum {
-                        Some(ref mut inner_output_sum) => {
-                            // merge in subsequent accumulators
-                            merge_vector(inner_output_sum, &accumulator.accumulated)
-                                .map_err(|_| Error::LengthMismatch)?;
-                        }
-                        // Initialize output sum with first non-empty accumulator
-                        None => output_sum = Some(accumulator.accumulated.clone()),
-                    }
+                    output_shares.push(accumulator.accumulated.clone());
 
                     accumulator.privacy_budget += 1;
                     total_contributions += accumulator.contributions;
@@ -448,7 +444,7 @@ impl Leader {
         }
 
         let output_share = OutputShare {
-            sum: Field64::slice_into_byte_vec(&output_sum.unwrap()),
+            sum: self.vdaf.aggregate(&(), output_shares)?,
             contributions: total_contributions,
         };
 

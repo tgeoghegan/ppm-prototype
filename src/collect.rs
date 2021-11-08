@@ -2,14 +2,17 @@
 
 use crate::{
     hpke::{self, Role},
-    merge_vector,
     parameters::{Parameters, TaskId},
     Interval,
 };
 use derivative::Derivative;
 use http::{header::CONTENT_TYPE, StatusCode};
 use http_api_problem::HttpApiProblem;
-use prio::field::{Field64, FieldElement};
+use prio::vdaf::{
+    prio3::{Prio3Result, Prio3Sum64},
+    suite::Suite,
+    Aggregatable, Collector, Vdaf,
+};
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -39,6 +42,8 @@ pub enum Error {
     Parameters(#[from] crate::parameters::Error),
     #[error("field error")]
     Field(#[from] prio::field::FieldError),
+    #[error("VDAF error")]
+    Vdaf(#[from] prio::vdaf::VdafError),
     #[error("{0}")]
     Unspecified(&'static str),
 }
@@ -75,10 +80,11 @@ pub struct OutputShareRequest {
 }
 
 /// An output share, sent from an aggregator to the collector
-// TODO this is a guess at what a Prio output share looks like
 #[derive(Clone, Debug, Derivative, PartialEq, Eq, Deserialize, Serialize)]
-pub struct OutputShare {
-    pub sum: Vec<u8>,
+pub struct OutputShare<A: Aggregatable> {
+    // Workaround for alleged compiler bug: https://github.com/serde-rs/serde/issues/1296
+    #[serde(deserialize_with = "A::deserialize")]
+    pub sum: A,
     pub contributions: u64,
 }
 
@@ -99,7 +105,10 @@ pub async fn run_collect(
     ppm_parameters: &Parameters,
     hpke_config: &hpke::Config,
     batch_interval: Interval,
-) -> Result<Vec<Field64>, Error> {
+) -> Result<Prio3Result<u64>, Error> {
+    // TODO: make this generic over Vdaf
+    let vdaf = Prio3Sum64::new(Suite::Blake3, 2, 63)?;
+
     let http_client = Client::builder().user_agent(COLLECTOR_USER_AGENT).build()?;
 
     let collect_request = CollectRequest {
@@ -134,7 +143,9 @@ pub async fn run_collect(
         Role::Leader,
         &collect_response_body.encrypted_output_shares[Role::Leader.index()].encapsulated_context,
     )?;
-    let decrypted_leader_share: OutputShare =
+
+    // TODO: make this generic over Vdaf
+    let decrypted_leader_share: OutputShare<<Prio3Sum64 as Vdaf>::OutputShare> =
         serde_json::from_slice(&leader_recipient.decrypt_output_share(
             &collect_response_body.encrypted_output_shares[Role::Leader.index()],
             batch_interval,
@@ -145,7 +156,7 @@ pub async fn run_collect(
         Role::Helper,
         &collect_response_body.encrypted_output_shares[Role::Helper.index()].encapsulated_context,
     )?;
-    let decrypted_helper_share: OutputShare =
+    let decrypted_helper_share: OutputShare<<Prio3Sum64 as Vdaf>::OutputShare> =
         serde_json::from_slice(&helper_recipient.decrypt_output_share(
             &collect_response_body.encrypted_output_shares[Role::Helper.index()],
             batch_interval,
@@ -158,10 +169,8 @@ pub async fn run_collect(
         ));
     }
 
-    let mut leader_share = Field64::byte_slice_into_vec(&decrypted_leader_share.sum)?;
-    let helper_share = Field64::byte_slice_into_vec(&decrypted_helper_share.sum)?;
-
-    merge_vector(&mut leader_share, &helper_share).map_err(Error::Unspecified)?;
-
-    Ok(leader_share)
+    Ok(vdaf.unshard(
+        &(),
+        [decrypted_leader_share.sum, decrypted_helper_share.sum],
+    )?)
 }
