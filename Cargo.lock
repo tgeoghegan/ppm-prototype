@@ -115,9 +115,9 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 
 [[package]]
 name = "blake3"
-version = "1.0.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcd555c66291d5f836dbb6883b48660ece810fe25a31f3bdfb911945dff2691f"
+checksum = "526c210b4520e416420759af363083471656e819a75e831b8d2c9d5a584f2413"
 dependencies = [
  "arrayref",
  "arrayvec",
@@ -1202,14 +1202,14 @@ checksum = "ac74c624d6b2d21f425f752262f42188365d7b8ff1aff74c82e45136510a4857"
 [[package]]
 name = "prio"
 version = "0.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2072cc268862274c8634e6f3e6ce6a77ca11a8d61039bec1c5c34f92a5837fc9"
+source = "git+https://github.com/abetterinternet/libprio-rs?branch=timg/ppm-prototype-tweaks#e79f73c37cd10bdd6b29f5e778c925f657408960"
 dependencies = [
  "aes",
  "aes-gcm",
  "base64",
  "blake3",
  "cipher",
+ "derivative",
  "getrandom 0.2.3",
  "ring",
  "serde",

@@ -2,7 +2,7 @@ use assert_matches::assert_matches;
 use color_eyre::Result;
 use http::StatusCode;
 use ppm_prototype::{
-    client::Client,
+    client::PpmClient,
     collect::{self, run_collect},
     helper::run_helper,
     hpke,
@@ -10,10 +10,8 @@ use ppm_prototype::{
     parameters::Parameters,
     trace, Interval, Time,
 };
-use prio::{field::Field64, pcp::types::Boolean};
 use serial_test::serial;
-use std::io::Cursor;
-use std::sync::Once;
+use std::{io::Cursor, sync::Once};
 use tokio::task::JoinHandle;
 
 const INTERVAL_START: u64 = 1631907500;
@@ -48,18 +46,16 @@ impl TestCase {
             tokio::spawn(run_helper(parameters.clone(), hpke_config.helper.clone()));
 
         // Generate and upload 100 reports, with timestamps one second apart
-        let mut client = Client::new(&parameters).await.unwrap();
+        let mut client = PpmClient::new(&parameters).await.unwrap();
         if tamper_leader_proof {
             client.tamper_with_leader_proof = true;
         }
         if tamper_helper_proof {
             client.tamper_with_helper_proof = true;
         }
+
         for count in 0..100 {
-            client
-                .do_upload(INTERVAL_START + count, Boolean::<Field64>::new(true))
-                .await
-                .unwrap();
+            client.do_upload(INTERVAL_START + count, 1).await.unwrap();
         }
 
         Self {
@@ -104,7 +100,7 @@ async fn successful_aggregate() {
     .await
     .unwrap();
 
-    assert_eq!(sum.first().unwrap(), &Field64::from(100));
+    assert_eq!(sum.0, 100);
 
     test_case.teardown().await;
 }
@@ -153,7 +149,7 @@ async fn exceed_privacy_budget() {
     .await
     .unwrap();
 
-    assert_eq!(sum.first().unwrap(), &Field64::from(100));
+    assert_eq!(sum.0, 100);
 
     // Collect again over same interval. Should fail because privacy budget is
     // exceeded.

@@ -5,15 +5,11 @@ use crate::{
     Time, Timestamp,
 };
 use ::hpke::Serializable;
-use color_eyre::eyre::{eyre, Result};
 use http::StatusCode;
-use prio::{
-    field::Field64,
-    pcp::types::Boolean,
-    vdaf::{
-        prio3_input,
-        suite::{Key, Suite},
-    },
+use prio::vdaf::{
+    prio3::Prio3Sum64,
+    suite::{Key, Suite},
+    Client,
 };
 
 #[derive(Debug, thiserror::Error)]
@@ -24,6 +20,14 @@ pub enum Error {
     HttpClient(#[from] reqwest::Error),
     #[error("bad protocol parameters")]
     Parameters(#[from] crate::parameters::Error),
+    #[error("VDAF error")]
+    Vdaf(#[from] prio::vdaf::VdafError),
+    #[error("Suite error")]
+    Suite(#[from] prio::vdaf::suite::SuiteError),
+    #[error("JSON error")]
+    Json(#[from] serde_json::Error),
+    #[error("Unspecified error: {0}")]
+    Unspecified(String),
 }
 
 static CLIENT_USER_AGENT: &str = concat!(
@@ -34,16 +38,19 @@ static CLIENT_USER_AGENT: &str = concat!(
     "client"
 );
 
-pub struct Client {
+#[derive(Debug)]
+pub struct PpmClient {
     http_client: reqwest::Client,
     parameters: Parameters,
     leader_hpke_config: hpke::Config,
     helper_hpke_config: hpke::Config,
+    // TODO: make PpmClient generic over `Vdaf`, or has-a Box<dyn Vdaf>
+    vdaf: Prio3Sum64,
     pub tamper_with_helper_proof: bool,
     pub tamper_with_leader_proof: bool,
 }
 
-impl Client {
+impl PpmClient {
     pub async fn new(ppm_parameters: &Parameters) -> Result<Self, Error> {
         let http_client = reqwest::Client::builder()
             .user_agent(CLIENT_USER_AGENT)
@@ -60,12 +67,13 @@ impl Client {
             parameters: ppm_parameters.clone(),
             leader_hpke_config,
             helper_hpke_config,
+            vdaf: Prio3Sum64::new(Suite::Blake3, 2, 63)?,
             tamper_with_helper_proof: false,
             tamper_with_leader_proof: false,
         })
     }
 
-    pub async fn do_upload(&self, time: u64, input: Boolean<Field64>) -> Result<()> {
+    pub async fn do_upload(&self, time: u64, input: u128) -> Result<(), Error> {
         let timestamp = Timestamp {
             time: Time(time),
             nonce: rand::random(),
@@ -73,7 +81,7 @@ impl Client {
 
         // Generate a Prio input and proof. The serialized format is input share
         // then proof share.
-        let mut upload_messages = prio3_input(Suite::Aes128CtrHmacSha256, &input, 2)?;
+        let mut upload_messages = self.vdaf.shard(&(), &input)?;
 
         // If requested, tamper with joint randomness seed hint, which will
         // cause proof verification to fail
@@ -137,10 +145,10 @@ impl Client {
             .await?
             .status();
         if status != StatusCode::OK {
-            return Err(eyre!(
+            return Err(Error::Unspecified(format!(
                 "unexpected HTTP status in upload request {:?}",
                 status
-            ));
+            )));
         }
 
         Ok(())

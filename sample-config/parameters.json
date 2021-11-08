@@ -14,8 +14,9 @@
     "max_batch_lifetime": 1,
     "min_batch_size": 100,
     "min_batch_duration": 50,
-    "Prio": {
-        "field": "Field64",
-        "type": "Boolean"
+    "vdaf": {
+        "Prio3Sum64": {
+            "bits": 64
+        }
     }
 }
