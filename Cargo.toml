@@ -16,6 +16,7 @@ hex = "0.4.3"
 http = "^0.2"
 http-api-problem = { version = "0.50.2", features = ["warp"] }
 prio = { git = "https://github.com/abetterinternet/libprio-rs", branch = "timg/ppm-prototype-tweaks" }
+#prio = { path = "/home/timg/source/libprio-rs" }
 rand = "0.8"
 reqwest = { version = "0.11.4", features = ["rustls", "json"] }
 serde = { version = "^1.0", features = ["derive"] }

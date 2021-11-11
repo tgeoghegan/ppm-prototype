@@ -145,7 +145,7 @@ pub async fn run_collect(
     )?;
 
     // TODO: make this generic over Vdaf
-    let decrypted_leader_share: OutputShare<<Prio3Sum64 as Vdaf>::OutputShare> =
+    let decrypted_leader_share: OutputShare<<Prio3Sum64 as Vdaf>::AggregateShare> =
         serde_json::from_slice(&leader_recipient.decrypt_output_share(
             &collect_response_body.encrypted_output_shares[Role::Leader.index()],
             batch_interval,
@@ -156,7 +156,7 @@ pub async fn run_collect(
         Role::Helper,
         &collect_response_body.encrypted_output_shares[Role::Helper.index()].encapsulated_context,
     )?;
-    let decrypted_helper_share: OutputShare<<Prio3Sum64 as Vdaf>::OutputShare> =
+    let decrypted_helper_share: OutputShare<<Prio3Sum64 as Vdaf>::AggregateShare> =
         serde_json::from_slice(&helper_recipient.decrypt_output_share(
             &collect_response_body.encrypted_output_shares[Role::Helper.index()],
             batch_interval,

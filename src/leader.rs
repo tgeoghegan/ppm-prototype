@@ -20,7 +20,7 @@ use http::StatusCode;
 use http_api_problem::HttpApiProblem;
 use prio::{
     field::FieldError,
-    vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregator, Vdaf, VdafError},
+    vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregatable, Aggregator, Vdaf, VdafError},
 };
 use reqwest::Client;
 use std::{
@@ -149,7 +149,7 @@ pub struct Leader {
     unaggregated_inputs: Vec<StoredInputShare<Prio3Sum64>>,
     /// Accumulated sums over inputs that have been verified in conjunction with
     /// the helper. The key is the start of the batch window.
-    accumulators: HashMap<DateTime<Utc>, Accumulator<<Prio3Sum64 as Vdaf>::OutputShare>>,
+    accumulators: HashMap<DateTime<Utc>, Accumulator<<Prio3Sum64 as Vdaf>::AggregateShare>>,
     helper_state: Vec<u8>,
     http_client: Client,
 }
@@ -320,7 +320,7 @@ impl Leader {
                 "verifying proof"
             );
 
-            let input_share = match self.vdaf.prepare_finish(
+            let output_share = match self.vdaf.prepare_finish(
                 leader_input.leader_state,
                 [
                     helper_verifier_message,
@@ -343,15 +343,16 @@ impl Leader {
             // the batch interval corresponding to the report timestamp.
             if let Some(sum) = self.accumulators.get_mut(&interval_start) {
                 self.vdaf
-                    .accumulate(&(), &mut sum.accumulated, &input_share)?;
+                    .accumulate(&(), &mut sum.accumulated, &output_share)?;
                 sum.contributions += 1;
             } else {
                 // This is the first input we have seen for this batch interval.
                 // Initialize the accumulator.
+                let accumulated = self.vdaf.aggregate(&(), [output_share])?;
                 self.accumulators.insert(
                     interval_start,
                     Accumulator {
-                        accumulated: input_share,
+                        accumulated,
                         contributions: 1,
                         privacy_budget: 0,
                     },
@@ -443,8 +444,12 @@ impl Leader {
             return Err(Error::InsufficientBatchSize(total_contributions));
         }
 
+        let rest = output_shares.split_off(1);
+        rest.iter()
+            .try_for_each(|agg_share| output_shares[0].merge(agg_share))?;
+
         let output_share = OutputShare {
-            sum: self.vdaf.aggregate(&(), output_shares)?,
+            sum: output_shares[0].clone(),
             contributions: total_contributions,
         };
 

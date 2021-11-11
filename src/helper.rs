@@ -15,7 +15,7 @@ use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
 use color_eyre::eyre::Result;
 use http::StatusCode;
-use prio::vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregator, Vdaf, VdafError};
+use prio::vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregatable, Aggregator, Vdaf, VdafError};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
@@ -83,7 +83,7 @@ pub struct Helper {
     hpke_config: hpke::Config,
     // TODO make Helper generic over Vdaf of has-a `Box<dyn Vdaf>`
     vdaf: Prio3Sum64,
-    helper_state: HelperState<<Prio3Sum64 as Vdaf>::OutputShare>,
+    helper_state: HelperState<<Prio3Sum64 as Vdaf>::AggregateShare>,
 }
 
 impl Helper {
@@ -95,19 +95,19 @@ impl Helper {
     ) -> Result<Self, Error> {
         // TODO(timg): encrypt helper state to protect it from leader and put
         // some kind of anti-replay token in there
-        let helper_state: HelperState<<Prio3Sum64 as Vdaf>::OutputShare> = if state_blob.is_empty()
-        {
-            // Start with empty state
-            HelperState {
-                accumulators: HashMap::new(),
-                last_timestamp_seen: Timestamp {
-                    time: Time(0),
-                    nonce: 0,
-                },
-            }
-        } else {
-            serde_json::from_slice(state_blob)?
-        };
+        let helper_state: HelperState<<Prio3Sum64 as Vdaf>::AggregateShare> =
+            if state_blob.is_empty() {
+                // Start with empty state
+                HelperState {
+                    accumulators: HashMap::new(),
+                    last_timestamp_seen: Timestamp {
+                        time: Time(0),
+                        nonce: 0,
+                    },
+                }
+            } else {
+                serde_json::from_slice(state_blob)?
+            };
         Ok(Self {
             parameters: parameters.clone(),
             hpke_config: hpke_config.clone(),
@@ -199,7 +199,7 @@ impl Helper {
                 state,
                 [leader_verifier_message, helper_verifier_message.clone()],
             ) {
-                Ok(input_share) => {
+                Ok(output_share) => {
                     // Proof is OK. Accumulate this share and send helper
                     // verifier share to leader so they can verify the proof
                     // too.
@@ -209,15 +209,16 @@ impl Helper {
                         .interval_start(self.parameters.min_batch_duration);
                     if let Some(sum) = self.helper_state.accumulators.get_mut(&interval_start) {
                         self.vdaf
-                            .accumulate(&(), &mut sum.accumulated, &input_share)?;
+                            .accumulate(&(), &mut sum.accumulated, &output_share)?;
                         sum.contributions += 1;
                     } else {
                         // This is the first input we have seen for this batch interval.
                         // Initialize the accumulator.
+                        let accumulated = self.vdaf.aggregate(&(), [output_share])?;
                         self.helper_state.accumulators.insert(
                             interval_start,
                             Accumulator {
-                                accumulated: input_share,
+                                accumulated,
                                 contributions: 1,
                                 privacy_budget: 0,
                             },
@@ -307,8 +308,12 @@ impl Helper {
             return Err(Error::InsufficientBatchSize(total_contributions));
         }
 
+        let rest = output_shares.split_off(1);
+        rest.iter()
+            .try_for_each(|agg_share| output_shares[0].merge(agg_share))?;
+
         let output_share = OutputShare {
-            sum: self.vdaf.aggregate(&(), output_shares)?,
+            sum: output_shares[0].clone(),
             contributions: total_contributions,
         };
 
