@@ -20,7 +20,7 @@ use http::StatusCode;
 use http_api_problem::HttpApiProblem;
 use prio::{
     field::FieldError,
-    vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregator, Vdaf, VdafError},
+    vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregatable, Aggregator, Vdaf, VdafError},
 };
 use reqwest::Client;
 use std::{
@@ -149,7 +149,7 @@ pub struct Leader {
     unaggregated_inputs: Vec<StoredInputShare<Prio3Sum64>>,
     /// Accumulated sums over inputs that have been verified in conjunction with
     /// the helper. The key is the start of the batch window.
-    accumulators: HashMap<DateTime<Utc>, Accumulator<<Prio3Sum64 as Vdaf>::OutputShare>>,
+    accumulators: HashMap<DateTime<Utc>, Accumulator<<Prio3Sum64 as Vdaf>::AggregateShare>>,
     helper_state: Vec<u8>,
     http_client: Client,
 }
@@ -320,14 +320,14 @@ impl Leader {
                 "verifying proof"
             );
 
-            let input_share = match self.vdaf.prepare_finish(
+            let output_share = match self.vdaf.prepare_finish(
                 leader_input.leader_state,
-                [
+                self.vdaf.prepare_preprocess([
                     helper_verifier_message,
                     leader_input.leader_verifier_message,
-                ],
+                ])?,
             ) {
-                Ok(input_share) => input_share,
+                Ok(output_share) => output_share,
                 Err(e) => {
                     let boxed_error: Box<dyn std::error::Error + 'static> = e.into();
                     warn!(
@@ -342,8 +342,7 @@ impl Leader {
             // Proof checked out -- sum the input share into the accumulator for
             // the batch interval corresponding to the report timestamp.
             if let Some(sum) = self.accumulators.get_mut(&interval_start) {
-                self.vdaf
-                    .accumulate(&(), &mut sum.accumulated, &input_share)?;
+                sum.accumulated.accumulate(&output_share)?;
                 sum.contributions += 1;
             } else {
                 // This is the first input we have seen for this batch interval.
@@ -351,7 +350,8 @@ impl Leader {
                 self.accumulators.insert(
                     interval_start,
                     Accumulator {
-                        accumulated: input_share,
+                        // TODO: we need the aggregation param for poplar1
+                        accumulated: self.vdaf.aggregate(&(), [output_share])?,
                         contributions: 1,
                         privacy_budget: 0,
                     },
@@ -410,7 +410,7 @@ impl Leader {
             .start
             .interval_start(self.parameters.min_batch_duration);
 
-        let mut output_shares = vec![];
+        let mut aggregate_shares = vec![];
         let mut total_contributions = 0;
 
         for i in 0..num_intervals_in_request {
@@ -423,7 +423,7 @@ impl Leader {
                     if accumulator.privacy_budget == self.parameters.max_batch_lifetime {
                         return Err(Error::PrivacyBudgetExceeded);
                     }
-                    output_shares.push(accumulator.accumulated.clone());
+                    aggregate_shares.push(accumulator.accumulated.clone());
 
                     accumulator.privacy_budget += 1;
                     total_contributions += accumulator.contributions;
@@ -443,8 +443,14 @@ impl Leader {
             return Err(Error::InsufficientBatchSize(total_contributions));
         }
 
-        let output_share = OutputShare {
-            sum: self.vdaf.aggregate(&(), output_shares)?,
+        // Merge aggregate shares into a single aggregate share
+        let remaining_shares = aggregate_shares.split_off(1);
+        for aggregate_share in remaining_shares.into_iter() {
+            aggregate_shares[0].merge(&aggregate_share)?;
+        }
+
+        let output_share: OutputShare<Prio3Sum64> = OutputShare {
+            sum: aggregate_shares.swap_remove(0),
             contributions: total_contributions,
         };
 

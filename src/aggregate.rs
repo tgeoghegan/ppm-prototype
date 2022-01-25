@@ -66,7 +66,7 @@ pub struct VerifySubResponse {
 /// Accumulator for some aggregation interval
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(crate) struct Accumulator<S> {
-    /// The value accumulated thus far. S will be some VDAF's OutputShare type.
+    /// The value accumulated thus far. S will be some VDAF's AggregateShare type.
     pub(crate) accumulated: S,
     /// How many contributions are included
     pub(crate) contributions: u64,

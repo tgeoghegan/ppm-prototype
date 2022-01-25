@@ -11,7 +11,7 @@ use http_api_problem::HttpApiProblem;
 use prio::vdaf::{
     prio3::{Prio3Result, Prio3Sum64},
     suite::Suite,
-    Aggregatable, Collector, Vdaf,
+    Collector, Vdaf,
 };
 use reqwest::{Client, Response};
 use serde::{Deserialize, Serialize};
@@ -81,10 +81,10 @@ pub struct OutputShareRequest {
 
 /// An output share, sent from an aggregator to the collector
 #[derive(Clone, Debug, Derivative, PartialEq, Eq, Deserialize, Serialize)]
-pub struct OutputShare<A: Aggregatable> {
+pub struct OutputShare<V: Vdaf> {
     // Workaround for alleged compiler bug: https://github.com/serde-rs/serde/issues/1296
-    #[serde(deserialize_with = "A::deserialize")]
-    pub sum: A,
+    #[serde(deserialize_with = "V::AggregateShare::deserialize")]
+    pub sum: V::AggregateShare,
     pub contributions: u64,
 }
 
@@ -145,7 +145,7 @@ pub async fn run_collect(
     )?;
 
     // TODO: make this generic over Vdaf
-    let decrypted_leader_share: OutputShare<<Prio3Sum64 as Vdaf>::OutputShare> =
+    let decrypted_leader_share: OutputShare<Prio3Sum64> =
         serde_json::from_slice(&leader_recipient.decrypt_output_share(
             &collect_response_body.encrypted_output_shares[Role::Leader.index()],
             batch_interval,
@@ -156,7 +156,7 @@ pub async fn run_collect(
         Role::Helper,
         &collect_response_body.encrypted_output_shares[Role::Helper.index()].encapsulated_context,
     )?;
-    let decrypted_helper_share: OutputShare<<Prio3Sum64 as Vdaf>::OutputShare> =
+    let decrypted_helper_share: OutputShare<Prio3Sum64> =
         serde_json::from_slice(&helper_recipient.decrypt_output_share(
             &collect_response_body.encrypted_output_shares[Role::Helper.index()],
             batch_interval,
