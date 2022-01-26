@@ -14,6 +14,7 @@ pub(crate) enum ProblemDocumentType {
     PrivacyBudgetExceeded,
     HelperError,
     UnknownError,
+    StaleReport,
 }
 
 impl From<ProblemDocumentType> for String {
@@ -27,6 +28,7 @@ impl From<ProblemDocumentType> for String {
             ProblemDocumentType::PrivacyBudgetExceeded => "privacyBudgetExceeded",
             ProblemDocumentType::HelperError => "helperError",
             ProblemDocumentType::UnknownError => "unknownError",
+            ProblemDocumentType::StaleReport => "staleReport",
         };
 
         format!("urn:ietf:params:ppm:error:{}", problem_type)

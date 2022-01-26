@@ -1,8 +1,8 @@
 //! Leader implementation
 use crate::{
     aggregate::{
-        dump_accumulators, prio3_verify_parameter, Accumulator, VerifyResponse, VerifyStartRequest,
-        VerifyStartSubRequest,
+        aggregate_report, dump_accumulators, prio3_verify_parameter, Accumulator, VerifyResponse,
+        VerifyStartRequest, VerifyStartSubRequest,
     },
     collect::{
         CollectRequest, CollectResponse, EncryptedOutputShare, OutputShare, OutputShareRequest,
@@ -74,6 +74,8 @@ pub enum Error {
     PrivacyBudgetExceeded,
     #[error("Length mismatch")]
     LengthMismatch,
+    #[error("Aggregation error")]
+    Aggregation(#[from] crate::aggregate::Error),
 }
 
 impl IntoHttpApiProblem for Error {
@@ -308,55 +310,17 @@ impl Leader {
             let helper_verifier_message: <Prio3Sum64 as Aggregator>::PrepareMessage =
                 serde_json::from_slice(&helper_response.verification_message)?;
 
-            let interval_start = leader_input
-                .timestamp
-                .time
-                .interval_start(self.parameters.min_batch_duration);
-
-            info!(
-                timestamp = ?leader_input.timestamp,
-                helper_verifier_message = ?helper_verifier_message,
-                leader_verifier_message = ?leader_input,
-                "verifying proof"
-            );
-
-            let output_share = match self.vdaf.prepare_finish(
+            aggregate_report(
+                &self.vdaf,
+                &self.parameters,
+                &mut self.accumulators,
+                // TODO wire up poplar1 agg param
+                &(),
+                leader_input.timestamp,
                 leader_input.leader_state,
-                self.vdaf.prepare_preprocess([
-                    helper_verifier_message,
-                    leader_input.leader_verifier_message,
-                ])?,
-            ) {
-                Ok(output_share) => output_share,
-                Err(e) => {
-                    let boxed_error: Box<dyn std::error::Error + 'static> = e.into();
-                    warn!(
-                        time = ?leader_input.timestamp,
-                        error = boxed_error.as_ref(),
-                        "proof did not check out for report"
-                    );
-                    continue;
-                }
-            };
-
-            // Proof checked out -- sum the input share into the accumulator for
-            // the batch interval corresponding to the report timestamp.
-            if let Some(sum) = self.accumulators.get_mut(&interval_start) {
-                sum.accumulated.accumulate(&output_share)?;
-                sum.contributions += 1;
-            } else {
-                // This is the first input we have seen for this batch interval.
-                // Initialize the accumulator.
-                self.accumulators.insert(
-                    interval_start,
-                    Accumulator {
-                        // TODO: we need the aggregation param for poplar1
-                        accumulated: self.vdaf.aggregate(&(), [output_share])?,
-                        contributions: 1,
-                        privacy_budget: 0,
-                    },
-                );
-            }
+                leader_input.leader_verifier_message,
+                helper_verifier_message,
+            )?;
         }
 
         self.helper_state = aggregate_response.helper_state;
@@ -420,12 +384,12 @@ impl Leader {
             );
             match self.accumulators.get_mut(&interval_start) {
                 Some(accumulator) => {
-                    if accumulator.privacy_budget == self.parameters.max_batch_lifetime {
+                    if accumulator.consumed_privacy_budget == self.parameters.max_batch_lifetime {
                         return Err(Error::PrivacyBudgetExceeded);
                     }
                     aggregate_shares.push(accumulator.accumulated.clone());
 
-                    accumulator.privacy_budget += 1;
+                    accumulator.consumed_privacy_budget += 1;
                     total_contributions += accumulator.contributions;
                 }
                 None => {

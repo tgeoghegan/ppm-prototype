@@ -2,8 +2,8 @@
 
 use crate::{
     aggregate::{
-        dump_accumulators, prio3_verify_parameter, Accumulator, VerifyResponse, VerifyStartRequest,
-        VerifySubResponse,
+        aggregate_report, dump_accumulators, prio3_verify_parameter, Accumulator, VerifyResponse,
+        VerifyStartRequest, VerifySubResponse,
     },
     collect::{EncryptedOutputShare, OutputShare, OutputShareRequest},
     error::{handle_rejection, IntoHttpApiProblem, ProblemDocumentType},
@@ -17,8 +17,12 @@ use color_eyre::eyre::Result;
 use http::StatusCode;
 use prio::vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregatable, Aggregator, Vdaf, VdafError};
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    fmt::Debug,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+};
 use tracing::{error, info, warn};
 use warp::{reply, Filter};
 
@@ -50,6 +54,8 @@ pub enum Error {
     LengthMismatch,
     #[error("Unspecified: {0}")]
     Unspecified(String),
+    #[error("Aggregation error")]
+    Aggregation(#[from] crate::aggregate::Error),
 }
 
 impl IntoHttpApiProblem for Error {
@@ -147,8 +153,6 @@ impl Helper {
             }
 
             if sub_request.helper_share.aggregator_config_id != self.hpke_config.id {
-                // TODO(timg) construct problem document with type=outdatedConfig
-                // per section 3.1
                 return Err(Error::UnknownHpkeConfig(
                     sub_request.helper_share.aggregator_config_id,
                 ));
@@ -184,57 +188,17 @@ impl Helper {
             let leader_verifier_message: <Prio3Sum64 as Aggregator>::PrepareMessage =
                 serde_json::from_slice(&sub_request.verify_message)?;
 
-            info!(
-                timestamp = ?sub_request.timestamp,
-                leader_verifier_message = ?leader_verifier_message,
-                helper_verifier_message = ?helper_verifier_message,
-                "verifying proof"
-            );
-
-            // Kinda unfortunate here that `verify_finish` consumes verifier
-            // shares: taking Vec<VerifierMessage> instead of &[VerifierMessage]
-            // forces allocation + copy to the heap, even if I own the value of
-            // leader_verifier_message, and it's not clear that I do.
-            match self.vdaf.prepare_finish(
+            aggregate_report(
+                &self.vdaf,
+                &self.parameters,
+                &mut self.helper_state.accumulators,
+                // TODO wire up poplar1 agg param
+                &(),
+                sub_request.timestamp,
                 state,
-                self.vdaf.prepare_preprocess([
-                    leader_verifier_message,
-                    helper_verifier_message.clone(),
-                ])?,
-            ) {
-                Ok(output_share) => {
-                    // Proof is OK. Accumulate this share and send helper
-                    // verifier share to leader so they can verify the proof
-                    // too.
-                    let interval_start = sub_request
-                        .timestamp
-                        .time
-                        .interval_start(self.parameters.min_batch_duration);
-                    if let Some(sum) = self.helper_state.accumulators.get_mut(&interval_start) {
-                        sum.accumulated.accumulate(&output_share)?;
-                        sum.contributions += 1;
-                    } else {
-                        // This is the first input we have seen for this batch interval.
-                        // Initialize the accumulator.
-                        self.helper_state.accumulators.insert(
-                            interval_start,
-                            Accumulator {
-                                accumulated: self.vdaf.aggregate(&(), [output_share])?,
-                                contributions: 1,
-                                privacy_budget: 0,
-                            },
-                        );
-                    }
-                }
-                Err(e) => {
-                    let boxed_error: Box<dyn std::error::Error + 'static> = e.into();
-                    warn!(
-                        time = ?sub_request.timestamp,
-                        error = boxed_error.as_ref(),
-                        "proof did not check out for aggregate sub-request"
-                    );
-                }
-            }
+                leader_verifier_message,
+                helper_verifier_message.clone(),
+            )?;
 
             sub_responses.push(VerifySubResponse {
                 timestamp: sub_request.timestamp,
@@ -286,12 +250,12 @@ impl Helper {
             info!(?interval_start);
             match self.helper_state.accumulators.get_mut(&interval_start) {
                 Some(accumulator) => {
-                    if accumulator.privacy_budget == self.parameters.max_batch_lifetime {
+                    if accumulator.consumed_privacy_budget == self.parameters.max_batch_lifetime {
                         return Err(Error::PrivacyBudgetExceeded);
                     }
                     aggregate_shares.push(accumulator.accumulated.clone());
 
-                    accumulator.privacy_budget += 1;
+                    accumulator.consumed_privacy_budget += 1;
                     total_contributions += accumulator.contributions;
                 }
                 None => {
