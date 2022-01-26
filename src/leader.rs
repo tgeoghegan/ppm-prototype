@@ -1,26 +1,23 @@
 //! Leader implementation
 use crate::{
     aggregate::{
-        aggregate_report, dump_accumulators, prio3_verify_parameter, Accumulator, VerifyResponse,
-        VerifyStartRequest, VerifyStartSubRequest,
+        aggregate_report, dump_accumulators, extract_output_share, prio3_verify_parameter,
+        Accumulator, VerifyResponse, VerifyStartRequest, VerifyStartSubRequest,
     },
-    collect::{
-        CollectRequest, CollectResponse, EncryptedOutputShare, OutputShare, OutputShareRequest,
-    },
+    collect::{CollectRequest, CollectResponse, EncryptedOutputShare, OutputShareRequest},
     error::{handle_rejection, response_to_api_problem, IntoHttpApiProblem, ProblemDocumentType},
     hpke::{self, Role},
     parameters::{Parameters, TaskId},
     upload::{EncryptedInputShare, Report, ReportExtension},
     with_shared_value, Interval, Timestamp,
 };
-use ::hpke::Serializable;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use color_eyre::eyre::Result;
 use http::StatusCode;
 use http_api_problem::HttpApiProblem;
 use prio::{
     field::FieldError,
-    vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregatable, Aggregator, Vdaf, VdafError},
+    vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregator, Vdaf, VdafError},
 };
 use reqwest::Client;
 use std::{
@@ -31,7 +28,7 @@ use std::{
     sync::Arc,
 };
 use tokio::sync::Mutex;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 use warp::{reply, Filter};
 
 static LEADER_USER_AGENT: &str = concat!(
@@ -60,20 +57,14 @@ pub enum Error {
     HelperHttpRequest(StatusCode, String),
     #[error("bad protocol parameters")]
     Parameters(#[from] crate::parameters::Error),
+    #[error("invalid batch interval {0}")]
+    InvalidBatchInterval(Interval),
     #[error("aggregate protocol error {0}")]
     AggregateProtocol(String),
     #[error("field error")]
     PrioField(#[from] FieldError),
     #[error("helper error")]
     HelperError(#[source] HttpApiProblem),
-    #[error("invalid batch interval {0}")]
-    InvalidBatchInterval(Interval),
-    #[error("insufficient batch size {0}")]
-    InsufficientBatchSize(u64),
-    #[error("request exceeds the batch's privacy budget")]
-    PrivacyBudgetExceeded,
-    #[error("Length mismatch")]
-    LengthMismatch,
     #[error("Aggregation error")]
     Aggregation(#[from] crate::aggregate::Error),
 }
@@ -88,11 +79,10 @@ impl IntoHttpApiProblem for Error {
             Self::Encryption(_) => Some(ProblemDocumentType::UnrecognizedMessage),
             Self::UnrecognizedTask(_) => Some(ProblemDocumentType::UnrecognizedTask),
             Self::UnknownHpkeConfig(_) => Some(ProblemDocumentType::OutdatedConfig),
-            Self::InvalidBatchInterval(_) => Some(ProblemDocumentType::InvalidBatchInterval),
-            Self::InsufficientBatchSize(_) => Some(ProblemDocumentType::InsufficientBatchSize),
-            Self::PrivacyBudgetExceeded => Some(ProblemDocumentType::PrivacyBudgetExceeded),
             Self::HelperError(_) => Some(ProblemDocumentType::HelperError),
             Self::HelperHttpRequest(_, _) => Some(ProblemDocumentType::HelperError),
+            Self::InvalidBatchInterval(_) => Some(ProblemDocumentType::InvalidBatchInterval),
+            Self::Aggregation(e) => e.problem_document_type(),
             _ => None,
         }
     }
@@ -342,10 +332,6 @@ impl Leader {
             return Err(Error::InvalidBatchInterval(collect_request.batch_interval));
         }
 
-        let num_intervals_in_request = collect_request
-            .batch_interval
-            .min_intervals_in_interval(self.parameters.min_batch_duration);
-
         let output_share_request = OutputShareRequest {
             task_id: collect_request.task_id,
             batch_interval: collect_request.batch_interval,
@@ -369,70 +355,12 @@ impl Leader {
 
         let helper_encrypted_output_share: EncryptedOutputShare = http_response.json().await?;
 
-        let first_interval = collect_request
-            .batch_interval
-            .start
-            .interval_start(self.parameters.min_batch_duration);
-
-        let mut aggregate_shares = vec![];
-        let mut total_contributions = 0;
-
-        for i in 0..num_intervals_in_request {
-            let interval_start = Utc.timestamp(
-                first_interval.timestamp() + (i * self.parameters.min_batch_duration) as i64,
-                0,
-            );
-            match self.accumulators.get_mut(&interval_start) {
-                Some(accumulator) => {
-                    if accumulator.consumed_privacy_budget == self.parameters.max_batch_lifetime {
-                        return Err(Error::PrivacyBudgetExceeded);
-                    }
-                    aggregate_shares.push(accumulator.accumulated.clone());
-
-                    accumulator.consumed_privacy_budget += 1;
-                    total_contributions += accumulator.contributions;
-                }
-                None => {
-                    // Most likely there are no contributions for this batch interval yet
-                    warn!(
-                        "no accumulator found for interval start {:?}",
-                        interval_start
-                    );
-                    continue;
-                }
-            };
-        }
-
-        if total_contributions < self.parameters.min_batch_size {
-            return Err(Error::InsufficientBatchSize(total_contributions));
-        }
-
-        // Merge aggregate shares into a single aggregate share
-        let remaining_shares = aggregate_shares.split_off(1);
-        for aggregate_share in remaining_shares.into_iter() {
-            aggregate_shares[0].merge(&aggregate_share)?;
-        }
-
-        let output_share: OutputShare<Prio3Sum64> = OutputShare {
-            sum: aggregate_shares.swap_remove(0),
-            contributions: total_contributions,
-        };
-
-        let json_output_share = serde_json::to_vec(&output_share)?;
-
-        let hpke_sender = self
-            .parameters
-            .collector_config
-            .output_share_sender(&self.parameters.task_id, Role::Leader)?;
-
-        let (payload, encapped) = hpke_sender
-            .encrypt_output_share(output_share_request.batch_interval, &json_output_share)?;
-
-        let leader_output_share = EncryptedOutputShare {
-            collector_hpke_config_id: self.parameters.collector_config.id,
-            encapsulated_context: encapped.to_bytes().to_vec(),
-            payload,
-        };
+        let leader_output_share = extract_output_share::<Prio3Sum64>(
+            Role::Leader,
+            &self.parameters,
+            collect_request.batch_interval,
+            &mut self.accumulators,
+        )?;
 
         Ok(CollectResponse {
             encrypted_output_shares: vec![leader_output_share, helper_encrypted_output_share],
