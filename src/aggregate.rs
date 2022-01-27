@@ -10,7 +10,9 @@ use crate::{
 };
 use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
-use prio::vdaf::{prio3::Prio3VerifyParam, suite::Key, Aggregatable, Aggregator};
+use prio::vdaf::{
+    self, poplar1::Poplar1VerifyParam, prio3::Prio3VerifyParam, suite::Key, Aggregatable, Vdaf,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Debug};
 use tracing::{info, warn};
@@ -41,16 +43,6 @@ impl IntoHttpApiProblem for Error {
             Self::PrivacyBudgetExceeded => Some(ProblemDocumentType::PrivacyBudgetExceeded),
             _ => None,
         }
-    }
-}
-
-/// Returns a fixed vector of randomness to be used in the Prio3 VDAF,
-/// in anticipation of cjpatton working out how aggregators will negotiate
-/// query randomness.
-pub(crate) fn prio3_verify_parameter(role: crate::hpke::Role) -> Prio3VerifyParam {
-    Prio3VerifyParam {
-        query_rand_init: Key::Blake3([1; 32]),
-        aggregator_id: role.index() as u8,
     }
 }
 
@@ -118,137 +110,218 @@ pub(crate) fn dump_accumulators<S: Debug>(accumulators: &HashMap<DateTime<Utc>, 
     }
 }
 
-pub(crate) fn aggregate_report<A: Aggregator>(
-    aggregator: &A,
-    parameters: &Parameters,
-    accumulators: &mut HashMap<DateTime<Utc>, Accumulator<A::AggregateShare>>,
-    aggregation_parameter: &A::AggregationParam,
-    timestamp: Timestamp,
-    prepare_state: A::PrepareStep,
-    leader_prepare_message: A::PrepareMessage,
-    helper_prepare_message: A::PrepareMessage,
-) -> Result<(), Error> {
-    info!(
-        ?timestamp,
-        ?leader_prepare_message,
-        ?helper_prepare_message,
-        "verifying proof"
-    );
-
-    let prepare_message =
-        aggregator.prepare_preprocess([leader_prepare_message, helper_prepare_message])?;
-
-    let output_share = match aggregator.prepare_finish(prepare_state, prepare_message) {
-        Ok(output_share) => output_share,
-        // Log errors but don't return them as the caller will want to process
-        // all the other reports
-        Err(e) => {
-            warn!(
-                time = ?timestamp,
-                error = ?e,
-                "proof did not check out for report"
-            );
-            return Ok(());
-        }
-    };
-
-    // Proof checked out. Now accumulate the output share into the accumulator
-    // for the batch interval corresponding to the report timestamp.
-    let interval_start = timestamp.time.interval_start(parameters.min_batch_duration);
-
-    if let Some(accumulator) = accumulators.get_mut(&interval_start) {
-        accumulator.accumulated.accumulate(&output_share)?;
-        accumulator.contributions += 1;
-    } else {
-        // This is the first input we have seen for this batch interval.
-        // Initialize the accumulator.
-        accumulators.insert(
-            interval_start,
-            Accumulator {
-                accumulated: aggregator.aggregate(aggregation_parameter, [output_share])?,
-                contributions: 1,
-                consumed_privacy_budget: 0,
-            },
-        );
-    }
-
-    Ok(())
+/// This trait is implemented on the `VerifyParam` associated type on
+/// `prio::vdaf::Vdaf` implementations so that we can generically get fake
+/// verification randomness in anticipation of working out how aggregators will
+/// negotiate it.
+pub(crate) trait DefaultVerifyParam {
+    fn default(role: Role) -> Self;
 }
 
-pub(crate) fn extract_output_share<A: Aggregator>(
-    role: Role,
-    parameters: &Parameters,
-    batch_interval: Interval,
-    accumulators: &mut HashMap<DateTime<Utc>, Accumulator<A::AggregateShare>>,
-) -> Result<EncryptedOutputShare, Error> {
-    if !parameters.validate_batch_interval(batch_interval) {
-        return Err(Error::InvalidBatchInterval(batch_interval));
+impl DefaultVerifyParam for Prio3VerifyParam {
+    fn default(role: Role) -> Self {
+        Self {
+            query_rand_init: Key::Blake3([1; 32]),
+            aggregator_id: role.index() as u8,
+        }
     }
+}
 
-    let num_intervals_in_request =
-        batch_interval.min_intervals_in_interval(parameters.min_batch_duration);
+impl DefaultVerifyParam for Poplar1VerifyParam {
+    fn default(role: Role) -> Self {
+        Self::new(&Key::Blake3([1; 32]), role == Role::Leader)
+    }
+}
 
-    let first_interval = batch_interval
-        .start
-        .interval_start(parameters.min_batch_duration);
+#[derive(Clone, Debug)]
+pub(crate) struct Aggregator<A: vdaf::Aggregator> {
+    role: Role,
+    aggregator: A,
+    task_parameters: Parameters,
+    aggregation_parameter: A::AggregationParam,
+    /// Accumulated sums over inputs that have been verified in conjunction with
+    /// the helper. The key is the start of the batch window.
+    accumulators: HashMap<DateTime<Utc>, Accumulator<A::AggregateShare>>,
+}
 
-    let mut aggregate_shares = vec![];
-    let mut total_contributions = 0;
-
-    for i in 0..num_intervals_in_request {
-        let interval_start = Utc.timestamp(
-            first_interval.timestamp() + (i * parameters.min_batch_duration) as i64,
-            0,
-        );
-        match accumulators.get_mut(&interval_start) {
-            Some(accumulator) => {
-                if accumulator.consumed_privacy_budget == parameters.max_batch_lifetime {
-                    return Err(Error::PrivacyBudgetExceeded);
-                }
-                aggregate_shares.push(accumulator.accumulated.clone());
-
-                accumulator.consumed_privacy_budget += 1;
-                total_contributions += accumulator.contributions;
-            }
-            None => {
-                // Most likely there are no contributions for this batch interval yet
-                warn!(
-                    "no accumulator found for interval start {:?}",
-                    interval_start
-                );
-                continue;
-            }
+impl<A> Aggregator<A>
+where
+    A: vdaf::Aggregator,
+    <A as Vdaf>::VerifyParam: DefaultVerifyParam,
+{
+    pub(crate) fn new(
+        role: Role,
+        aggregator: A,
+        task_parameters: Parameters,
+        aggregation_parameter: A::AggregationParam,
+        accumulators: HashMap<DateTime<Utc>, Accumulator<A::AggregateShare>>,
+    ) -> Self {
+        // TODO: construct accumulators here once we stop storing them in
+        // state blob
+        // TODO: construct aggregator here from task_parameters
+        Self {
+            role,
+            aggregator,
+            task_parameters,
+            aggregation_parameter,
+            accumulators,
         }
     }
 
-    if total_contributions < parameters.min_batch_size {
-        return Err(Error::InsufficientBatchSize(total_contributions));
+    pub(crate) fn prepare_message(
+        &self,
+        timestamp: Timestamp,
+        input_share: &A::InputShare,
+    ) -> Result<(A::PrepareStep, A::PrepareMessage), Error> {
+        let step = self.aggregator.prepare_init(
+            &A::VerifyParam::default(self.role),
+            &self.aggregation_parameter,
+            &timestamp.associated_data(),
+            input_share,
+        )?;
+
+        Ok(self.aggregator.prepare_start(step)?)
     }
 
-    // Merge aggregate shares into a single aggregate share
-    let remaining_shares = aggregate_shares.split_off(1);
-    for aggregate_share in remaining_shares.into_iter() {
-        aggregate_shares[0].merge(&aggregate_share)?;
+    pub(crate) fn aggregate_report<I: IntoIterator<Item = A::PrepareMessage>>(
+        &mut self,
+        timestamp: Timestamp,
+        step: A::PrepareStep,
+        prepare_messages: I,
+    ) -> Result<(), Error> {
+        info!(?timestamp, "verifying proof");
+
+        let prepare_message = self.aggregator.prepare_preprocess(prepare_messages)?;
+
+        let output_share = match self.aggregator.prepare_finish(step, prepare_message) {
+            Ok(output_share) => output_share,
+            // Log errors but don't return them as the caller will want to process
+            // all the other reports
+            Err(e) => {
+                warn!(
+                    time = ?timestamp,
+                    error = ?e,
+                    "proof did not check out for report"
+                );
+                return Ok(());
+            }
+        };
+
+        // Proof checked out. Now accumulate the output share into the accumulator
+        // for the batch interval corresponding to the report timestamp.
+        let interval_start = timestamp
+            .time
+            .interval_start(self.task_parameters.min_batch_duration);
+
+        if let Some(accumulator) = self.accumulators.get_mut(&interval_start) {
+            accumulator.accumulated.accumulate(&output_share)?;
+            accumulator.contributions += 1;
+        } else {
+            // This is the first input we have seen for this batch interval.
+            // Initialize the accumulator.
+            self.accumulators.insert(
+                interval_start,
+                Accumulator {
+                    accumulated: self
+                        .aggregator
+                        .aggregate(&self.aggregation_parameter, [output_share])?,
+                    contributions: 1,
+                    consumed_privacy_budget: 0,
+                },
+            );
+        }
+
+        Ok(())
     }
 
-    let output_share: OutputShare<A> = OutputShare {
-        sum: aggregate_shares.swap_remove(0),
-        contributions: total_contributions,
-    };
+    pub(crate) fn extract_output_share(
+        &mut self,
+        batch_interval: Interval,
+    ) -> Result<EncryptedOutputShare, Error> {
+        if !self.task_parameters.validate_batch_interval(batch_interval) {
+            return Err(Error::InvalidBatchInterval(batch_interval));
+        }
 
-    // TODO use TLS serialization
-    let json_output_share = serde_json::to_vec(&output_share)?;
+        let num_intervals_in_request =
+            batch_interval.min_intervals_in_interval(self.task_parameters.min_batch_duration);
 
-    let hpke_sender = parameters
-        .collector_config
-        .output_share_sender(&parameters.task_id, role)?;
+        let first_interval = batch_interval
+            .start
+            .interval_start(self.task_parameters.min_batch_duration);
 
-    let (payload, encapped) =
-        hpke_sender.encrypt_output_share(batch_interval, &json_output_share)?;
+        let mut aggregate_shares = vec![];
+        let mut total_contributions = 0;
 
-    Ok(EncryptedOutputShare {
-        collector_hpke_config_id: parameters.collector_config.id,
-        encapsulated_context: encapped.to_bytes().to_vec(),
-        payload,
-    })
+        for i in 0..num_intervals_in_request {
+            let interval_start = Utc.timestamp(
+                first_interval.timestamp() + (i * self.task_parameters.min_batch_duration) as i64,
+                0,
+            );
+            match self.accumulators.get_mut(&interval_start) {
+                Some(accumulator) => {
+                    if accumulator.consumed_privacy_budget
+                        == self.task_parameters.max_batch_lifetime
+                    {
+                        return Err(Error::PrivacyBudgetExceeded);
+                    }
+                    aggregate_shares.push(accumulator.accumulated.clone());
+
+                    accumulator.consumed_privacy_budget += 1;
+                    total_contributions += accumulator.contributions;
+                }
+                None => {
+                    // Most likely there are no contributions for this batch interval yet
+                    warn!(
+                        "no accumulator found for interval start {:?}",
+                        interval_start
+                    );
+                    continue;
+                }
+            }
+        }
+
+        if total_contributions < self.task_parameters.min_batch_size {
+            return Err(Error::InsufficientBatchSize(total_contributions));
+        }
+
+        // Merge aggregate shares into a single aggregate share
+        let remaining_shares = aggregate_shares.split_off(1);
+        for aggregate_share in remaining_shares.into_iter() {
+            aggregate_shares[0].merge(&aggregate_share)?;
+        }
+
+        let output_share: OutputShare<A> = OutputShare {
+            sum: aggregate_shares.swap_remove(0),
+            contributions: total_contributions,
+        };
+
+        // TODO use TLS serialization
+        let json_output_share = serde_json::to_vec(&output_share)?;
+
+        let hpke_sender = self
+            .task_parameters
+            .collector_config
+            .output_share_sender(&self.task_parameters.task_id, self.role)?;
+
+        let (payload, encapped) =
+            hpke_sender.encrypt_output_share(batch_interval, &json_output_share)?;
+
+        Ok(EncryptedOutputShare {
+            collector_hpke_config_id: self.task_parameters.collector_config.id,
+            encapsulated_context: encapped.to_bytes().to_vec(),
+            payload,
+        })
+    }
+
+    pub(crate) fn dump_accumulators(&self) {
+        dump_accumulators(&self.accumulators)
+    }
+
+    // hack so we can reconstruct helper state
+    // TODO: delete this once we get rid of helper state
+    pub(crate) fn clone_accumulators(
+        &self,
+    ) -> HashMap<DateTime<Utc>, Accumulator<A::AggregateShare>> {
+        self.accumulators.clone()
+    }
 }

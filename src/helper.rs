@@ -1,10 +1,7 @@
 //! Helper implementation
 
 use crate::{
-    aggregate::{
-        aggregate_report, dump_accumulators, extract_output_share, prio3_verify_parameter,
-        Accumulator, VerifyResponse, VerifyStartRequest, VerifySubResponse,
-    },
+    aggregate::{Accumulator, Aggregator, VerifyResponse, VerifyStartRequest, VerifySubResponse},
     collect::{EncryptedOutputShare, OutputShareRequest},
     error::{handle_rejection, IntoHttpApiProblem, ProblemDocumentType},
     hpke::{self, Role},
@@ -14,7 +11,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::Result;
 use http::StatusCode;
-use prio::vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregator, Vdaf, VdafError};
+use prio::vdaf::{self, prio3::Prio3Sum64, suite::Suite, Vdaf, VdafError};
 use serde::{Deserialize, Serialize};
 use std::{
     cmp::Ordering,
@@ -72,9 +69,8 @@ struct HelperState<S> {
 pub struct Helper {
     parameters: Parameters,
     hpke_config: hpke::Config,
-    // TODO make Helper generic over Vdaf of has-a `Box<dyn Vdaf>`
-    vdaf: Prio3Sum64,
-    helper_state: HelperState<<Prio3Sum64 as Vdaf>::AggregateShare>,
+    aggregator: Aggregator<Prio3Sum64>,
+    last_timestamp_seen: Timestamp,
 }
 
 impl Helper {
@@ -84,8 +80,7 @@ impl Helper {
         hpke_config: &hpke::Config,
         state_blob: &[u8],
     ) -> Result<Self, Error> {
-        // TODO(timg): encrypt helper state to protect it from leader and put
-        // some kind of anti-replay token in there
+        // TODO(timg): no more helper state blob
         let helper_state: HelperState<<Prio3Sum64 as Vdaf>::AggregateShare> =
             if state_blob.is_empty() {
                 // Start with empty state
@@ -99,11 +94,22 @@ impl Helper {
             } else {
                 serde_json::from_slice(state_blob)?
             };
+
+        let aggregator = Aggregator::new(
+            hpke::Role::Helper,
+            Prio3Sum64::new(Suite::Blake3, 2, 63)?,
+            // TODO: lame that both structs own a copy of parameters
+            parameters.clone(),
+            // TODO: wire up aggregation parameter for poplar
+            (),
+            helper_state.accumulators,
+        );
+
         Ok(Self {
             parameters: parameters.clone(),
             hpke_config: hpke_config.clone(),
-            vdaf: Prio3Sum64::new(Suite::Blake3, 2, 63)?,
-            helper_state,
+            aggregator,
+            last_timestamp_seen: helper_state.last_timestamp_seen,
         })
     }
 
@@ -124,14 +130,10 @@ impl Helper {
         let mut sub_responses = vec![];
 
         for sub_request in &request.sub_requests {
-            if sub_request
-                .timestamp
-                .cmp(&self.helper_state.last_timestamp_seen)
-                != Ordering::Greater
-            {
+            if sub_request.timestamp.cmp(&self.last_timestamp_seen) != Ordering::Greater {
                 warn!(
                     request_timestamp = ?sub_request.timestamp,
-                    last_timestamp_seen = ?self.helper_state.last_timestamp_seen,
+                    last_timestamp_seen = ?self.last_timestamp_seen,
                     "ignoring report whose timestamp is too old"
                 );
                 continue;
@@ -160,43 +162,34 @@ impl Helper {
             let input_share_message: <Prio3Sum64 as Vdaf>::InputShare =
                 serde_json::from_slice(&decrypted_input_share)?;
 
-            let state = self.vdaf.prepare_init(
-                &prio3_verify_parameter(Role::Helper),
-                &(),
-                &sub_request.timestamp.associated_data(),
-                &input_share_message,
-            )?;
+            let (step, helper_prepare_message) = self
+                .aggregator
+                .prepare_message(sub_request.timestamp, &input_share_message)?;
 
-            // Construct helper verifier message
-            let (state, helper_verifier_message) = self.vdaf.prepare_start(state)?;
-
-            let leader_verifier_message: <Prio3Sum64 as Aggregator>::PrepareMessage =
+            let leader_prepare_message: <Prio3Sum64 as vdaf::Aggregator>::PrepareMessage =
                 serde_json::from_slice(&sub_request.verify_message)?;
 
-            aggregate_report(
-                &self.vdaf,
-                &self.parameters,
-                &mut self.helper_state.accumulators,
-                // TODO wire up poplar1 agg param
-                &(),
+            self.aggregator.aggregate_report(
                 sub_request.timestamp,
-                state,
-                leader_verifier_message,
-                helper_verifier_message.clone(),
+                step,
+                [helper_prepare_message.clone(), leader_prepare_message],
             )?;
 
             sub_responses.push(VerifySubResponse {
                 timestamp: sub_request.timestamp,
-                verification_message: serde_json::to_vec(&helper_verifier_message)?,
+                verification_message: serde_json::to_vec(&helper_prepare_message)?,
             });
 
-            self.helper_state.last_timestamp_seen = sub_request.timestamp;
+            self.last_timestamp_seen = sub_request.timestamp;
         }
 
-        dump_accumulators(&self.helper_state.accumulators);
+        self.aggregator.dump_accumulators();
 
         Ok(VerifyResponse {
-            helper_state: serde_json::to_vec(&self.helper_state)?,
+            helper_state: serde_json::to_vec(&HelperState {
+                accumulators: self.aggregator.clone_accumulators(),
+                last_timestamp_seen: self.last_timestamp_seen,
+            })?,
             sub_responses,
         })
     }
@@ -206,12 +199,9 @@ impl Helper {
         &mut self,
         output_share_request: &OutputShareRequest,
     ) -> Result<EncryptedOutputShare, Error> {
-        Ok(extract_output_share::<Prio3Sum64>(
-            Role::Helper,
-            &self.parameters,
-            output_share_request.batch_interval,
-            &mut self.helper_state.accumulators,
-        )?)
+        Ok(self
+            .aggregator
+            .extract_output_share(output_share_request.batch_interval)?)
     }
 }
 
