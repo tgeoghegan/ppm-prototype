@@ -3,12 +3,10 @@ use crate::{
     Interval, Timestamp,
 };
 use ::hpke::{
-    aead::{Aead, AeadTag, AesGcm128, AesGcm256, ChaCha20Poly1305},
+    aead::{Aead, AeadCtxR, AeadCtxS, AesGcm128, AesGcm256, ChaCha20Poly1305},
     kdf::{HkdfSha256, HkdfSha384, HkdfSha512, Kdf},
     kem::{DhP256HkdfSha256, X25519HkdfSha256},
-    kex::KeyExchange,
-    setup_receiver, setup_sender, AeadCtxR, AeadCtxS, Deserializable, EncappedKey, HpkeError, Kem,
-    OpModeR, OpModeS, Serializable,
+    setup_receiver, setup_sender, Deserializable, HpkeError, Kem, OpModeR, OpModeS, Serializable,
 };
 use http::StatusCode;
 use rand::thread_rng;
@@ -364,7 +362,7 @@ pub type DefaultSender =
 /// An HPKE sender that encrypts messages to some recipient public key using
 /// a chosen set of AEAD, key derivation and key encapsulation algorithms.
 pub struct Sender<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> {
-    encapped_key: EncappedKey<Encapsulate::Kex>,
+    encapped_key: Encapsulate::EncappedKey,
     context: AeadCtxS<Encrypt, Derive, Encapsulate>,
 }
 
@@ -380,9 +378,8 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
 
         // Deserialize recipient pub into the appropriate PublicKey type for the
         // KEM
-        let recipient_public_key = <Encapsulate::Kex as KeyExchange>::PublicKey::from_bytes(
-            serialized_recipient_public_key,
-        )?;
+        let recipient_public_key =
+            Encapsulate::PublicKey::from_bytes(serialized_recipient_public_key)?;
 
         let (encapped_key, context) = setup_sender::<Encrypt, Derive, Encapsulate, _>(
             &OpModeS::Base,
@@ -409,10 +406,9 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
         mut self,
         timestamp: Timestamp,
         plaintext: &[u8],
-    ) -> Result<(Vec<u8>, EncappedKey<Encapsulate::Kex>), Error> {
-        let (ciphertext, tag) = self.seal(plaintext, &timestamp.associated_data())?;
+    ) -> Result<(Vec<u8>, Encapsulate::EncappedKey), Error> {
         Ok((
-            [&ciphertext, tag.to_bytes().as_slice()].concat(),
+            self.seal(plaintext, &timestamp.associated_data())?,
             self.encapped_key,
         ))
     }
@@ -421,26 +417,15 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
         mut self,
         batch_interval: Interval,
         plaintext: &[u8],
-    ) -> Result<(Vec<u8>, EncappedKey<Encapsulate::Kex>), Error> {
-        let (ciphertext, tag) = self.seal(plaintext, &batch_interval.associated_data())?;
+    ) -> Result<(Vec<u8>, Encapsulate::EncappedKey), Error> {
         Ok((
-            [&ciphertext, tag.to_bytes().as_slice()].concat(),
+            self.seal(plaintext, &batch_interval.associated_data())?,
             self.encapped_key,
         ))
     }
 
-    fn seal(
-        &mut self,
-        plaintext: &[u8],
-        associated_data: &[u8],
-    ) -> Result<(Vec<u8>, AeadTag<Encrypt>), Error> {
-        // AeadCtxS.seal() encrypts in-place, so make a copy to return to the
-        // caller
-        // TODO(timg): provide a seal_in_place variant for performance
-        let mut plaintext_copy = plaintext.to_vec();
-        let tag = self.context.seal(&mut plaintext_copy, associated_data)?;
-
-        Ok((plaintext_copy, tag))
+    fn seal(&mut self, plaintext: &[u8], associated_data: &[u8]) -> Result<Vec<u8>, Error> {
+        Ok(self.context.seal(plaintext, associated_data)?)
     }
 }
 
@@ -459,14 +444,13 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
     ) -> Result<Self, Error> {
         // Deserialize recipient priv into the appropriate PrivateKey type for
         // the KEM
-        let recipient_private_key = <Encapsulate::Kex as KeyExchange>::PrivateKey::from_bytes(
-            serialized_recipient_private_key,
-        )?;
+        let recipient_private_key =
+            Encapsulate::PrivateKey::from_bytes(serialized_recipient_private_key)?;
 
         // Deserialize sender encapsulated pub into the appropriate EncappedKey
         // for the KEM
         let sender_encapped_key =
-            EncappedKey::<Encapsulate::Kex>::from_bytes(serialized_sender_encapsulated_key)?;
+            Encapsulate::EncappedKey::from_bytes(serialized_sender_encapsulated_key)?;
 
         let context = setup_receiver::<Encrypt, Derive, Encapsulate>(
             &OpModeR::Base,
@@ -489,14 +473,7 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
         encrypted_input_share: &EncryptedInputShare,
         associated_data: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        let tag_len = AeadTag::<Encrypt>::size();
-        let payload = &encrypted_input_share.payload;
-
-        // This assumes that `EncryptedInputShare.payload` consists of
-        // (ciphertext || tag). That's true for all AEADs currently supported by
-        // HPKE but may not always be true.
-        let (ciphertext, tag) = payload.split_at(payload.len() - tag_len);
-        self.open(ciphertext, associated_data, tag)
+        self.open(&encrypted_input_share.payload, associated_data)
     }
 
     pub fn decrypt_output_share(
@@ -504,30 +481,14 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
         encrypted_output_share: &EncryptedOutputShare,
         batch_interval: Interval,
     ) -> Result<Vec<u8>, Error> {
-        let tag_len = AeadTag::<Encrypt>::size();
-        let payload = &encrypted_output_share.payload;
-
-        let (ciphertext, tag) = payload.split_at(payload.len() - tag_len);
-        self.open(ciphertext, &batch_interval.associated_data(), tag)
+        self.open(
+            &encrypted_output_share.payload,
+            &batch_interval.associated_data(),
+        )
     }
 
-    fn open(
-        &mut self,
-        ciphertext: &[u8],
-        associated_data: &[u8],
-        serialized_tag: &[u8],
-    ) -> Result<Vec<u8>, Error> {
-        // Deserialize tag into the appropriate AeadTag type for the cipher
-        let tag = AeadTag::<Encrypt>::from_bytes(serialized_tag)?;
-
-        // AeadCtxR.open() decrypts in-place, so make a copy to return to the
-        // caller
-        // TODO(timg): provide an open_in_place variant for performance
-        let mut ciphertext_copy = ciphertext.to_vec();
-        self.context
-            .open(&mut ciphertext_copy, associated_data, &tag)?;
-
-        Ok(ciphertext_copy)
+    fn open(&mut self, ciphertext: &[u8], associated_data: &[u8]) -> Result<Vec<u8>, Error> {
+        Ok(self.context.open(ciphertext, associated_data)?)
     }
 }
 
@@ -572,7 +533,7 @@ mod tests {
             (_, _, _) => unimplemented!("unsupported set of algos"),
         };
 
-        let (ciphertext, tag) = sender.seal(message, message_associated_data).unwrap();
+        let ciphertext = sender.seal(message, message_associated_data).unwrap();
 
         let mut recipient = match (&config.kem_id, &config.kdf_id, &config.aead_id) {
             (
@@ -589,7 +550,7 @@ mod tests {
         };
 
         let plaintext = recipient
-            .open(&ciphertext, message_associated_data, &tag.to_bytes())
+            .open(&ciphertext, message_associated_data)
             .unwrap();
 
         assert_eq!(plaintext, message);

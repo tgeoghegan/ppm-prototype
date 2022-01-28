@@ -1,24 +1,24 @@
 //! Helper implementation
 
 use crate::{
-    aggregate::{
-        dump_accumulators, prio3_verify_parameter, Accumulator, VerifyResponse, VerifyStartRequest,
-        VerifySubResponse,
-    },
-    collect::{EncryptedOutputShare, OutputShare, OutputShareRequest},
+    aggregate::{Accumulator, Aggregator, VerifyResponse, VerifyStartRequest, VerifySubResponse},
+    collect::{EncryptedOutputShare, OutputShareRequest},
     error::{handle_rejection, IntoHttpApiProblem, ProblemDocumentType},
     hpke::{self, Role},
     parameters::{Parameters, TaskId},
-    with_shared_value, Interval, Time, Timestamp,
+    with_shared_value, Time, Timestamp,
 };
-use ::hpke::Serializable;
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use color_eyre::eyre::Result;
 use http::StatusCode;
-use prio::vdaf::{prio3::Prio3Sum64, suite::Suite, Aggregator, Vdaf, VdafError};
+use prio::vdaf::{self, prio3::Prio3Sum64, suite::Suite, Vdaf, VdafError};
 use serde::{Deserialize, Serialize};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::{cmp::Ordering, collections::HashMap, fmt::Debug};
+use std::{
+    cmp::Ordering,
+    collections::HashMap,
+    fmt::Debug,
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+};
 use tracing::{error, info, warn};
 use warp::{reply, Filter};
 
@@ -38,18 +38,8 @@ pub enum Error {
     HttpClient(#[from] reqwest::Error),
     #[error("Aggregate HTTP request error")]
     AggregateRequest(StatusCode),
-    #[error("bad protocol parameters {0}")]
-    Parameters(#[from] crate::parameters::Error),
-    #[error("invalid batch interval {0}")]
-    InvalidBatchInterval(Interval),
-    #[error("insufficient batch size {0}")]
-    InsufficientBatchSize(u64),
-    #[error("request exceeds the batch's privacy budget")]
-    PrivacyBudgetExceeded,
-    #[error("Length mismatch")]
-    LengthMismatch,
-    #[error("Unspecified: {0}")]
-    Unspecified(String),
+    #[error("Aggregation error")]
+    Aggregation(#[from] crate::aggregate::Error),
 }
 
 impl IntoHttpApiProblem for Error {
@@ -62,9 +52,7 @@ impl IntoHttpApiProblem for Error {
             Self::Encryption(_) => Some(ProblemDocumentType::UnrecognizedMessage),
             Self::UnrecognizedTask(_) => Some(ProblemDocumentType::UnrecognizedTask),
             Self::UnknownHpkeConfig(_) => Some(ProblemDocumentType::OutdatedConfig),
-            Self::InvalidBatchInterval(_) => Some(ProblemDocumentType::InvalidBatchInterval),
-            Self::InsufficientBatchSize(_) => Some(ProblemDocumentType::InsufficientBatchSize),
-            Self::PrivacyBudgetExceeded => Some(ProblemDocumentType::PrivacyBudgetExceeded),
+            Self::Aggregation(e) => e.problem_document_type(),
             _ => None,
         }
     }
@@ -81,9 +69,8 @@ struct HelperState<S> {
 pub struct Helper {
     parameters: Parameters,
     hpke_config: hpke::Config,
-    // TODO make Helper generic over Vdaf of has-a `Box<dyn Vdaf>`
-    vdaf: Prio3Sum64,
-    helper_state: HelperState<<Prio3Sum64 as Vdaf>::OutputShare>,
+    aggregator: Aggregator<Prio3Sum64>,
+    last_timestamp_seen: Timestamp,
 }
 
 impl Helper {
@@ -93,26 +80,36 @@ impl Helper {
         hpke_config: &hpke::Config,
         state_blob: &[u8],
     ) -> Result<Self, Error> {
-        // TODO(timg): encrypt helper state to protect it from leader and put
-        // some kind of anti-replay token in there
-        let helper_state: HelperState<<Prio3Sum64 as Vdaf>::OutputShare> = if state_blob.is_empty()
-        {
-            // Start with empty state
-            HelperState {
-                accumulators: HashMap::new(),
-                last_timestamp_seen: Timestamp {
-                    time: Time(0),
-                    nonce: 0,
-                },
-            }
-        } else {
-            serde_json::from_slice(state_blob)?
-        };
+        // TODO(timg): no more helper state blob
+        let helper_state: HelperState<<Prio3Sum64 as Vdaf>::AggregateShare> =
+            if state_blob.is_empty() {
+                // Start with empty state
+                HelperState {
+                    accumulators: HashMap::new(),
+                    last_timestamp_seen: Timestamp {
+                        time: Time(0),
+                        nonce: 0,
+                    },
+                }
+            } else {
+                serde_json::from_slice(state_blob)?
+            };
+
+        let aggregator = Aggregator::new(
+            hpke::Role::Helper,
+            Prio3Sum64::new(Suite::Blake3, 2, 63)?,
+            // TODO: lame that both structs own a copy of parameters
+            parameters.clone(),
+            // TODO: wire up aggregation parameter for poplar
+            (),
+            helper_state.accumulators,
+        );
+
         Ok(Self {
             parameters: parameters.clone(),
             hpke_config: hpke_config.clone(),
-            vdaf: Prio3Sum64::new(Suite::Blake3, 2, 63)?,
-            helper_state,
+            aggregator,
+            last_timestamp_seen: helper_state.last_timestamp_seen,
         })
     }
 
@@ -133,22 +130,16 @@ impl Helper {
         let mut sub_responses = vec![];
 
         for sub_request in &request.sub_requests {
-            if sub_request
-                .timestamp
-                .cmp(&self.helper_state.last_timestamp_seen)
-                != Ordering::Greater
-            {
+            if sub_request.timestamp.cmp(&self.last_timestamp_seen) != Ordering::Greater {
                 warn!(
                     request_timestamp = ?sub_request.timestamp,
-                    last_timestamp_seen = ?self.helper_state.last_timestamp_seen,
+                    last_timestamp_seen = ?self.last_timestamp_seen,
                     "ignoring report whose timestamp is too old"
                 );
                 continue;
             }
 
             if sub_request.helper_share.aggregator_config_id != self.hpke_config.id {
-                // TODO(timg) construct problem document with type=outdatedConfig
-                // per section 3.1
                 return Err(Error::UnknownHpkeConfig(
                     sub_request.helper_share.aggregator_config_id,
                 ));
@@ -171,81 +162,34 @@ impl Helper {
             let input_share_message: <Prio3Sum64 as Vdaf>::InputShare =
                 serde_json::from_slice(&decrypted_input_share)?;
 
-            let state = self.vdaf.prepare_init(
-                &prio3_verify_parameter(Role::Helper),
-                &(),
-                &sub_request.timestamp.associated_data(),
-                &input_share_message,
-            )?;
+            let (step, helper_prepare_message) = self
+                .aggregator
+                .prepare_message(sub_request.timestamp, &input_share_message)?;
 
-            // Construct helper verifier message
-            let (state, helper_verifier_message) = self.vdaf.prepare_start(state)?;
-
-            let leader_verifier_message: <Prio3Sum64 as Aggregator>::PrepareMessage =
+            let leader_prepare_message: <Prio3Sum64 as vdaf::Aggregator>::PrepareMessage =
                 serde_json::from_slice(&sub_request.verify_message)?;
 
-            info!(
-                timestamp = ?sub_request.timestamp,
-                leader_verifier_message = ?leader_verifier_message,
-                helper_verifier_message = ?helper_verifier_message,
-                "verifying proof"
-            );
-
-            // Kinda unfortunate here that `verify_finish` consumes verifier
-            // shares: taking Vec<VerifierMessage> instead of &[VerifierMessage]
-            // forces allocation + copy to the heap, even if I own the value of
-            // leader_verifier_message, and it's not clear that I do.
-            match self.vdaf.prepare_finish(
-                state,
-                [leader_verifier_message, helper_verifier_message.clone()],
-            ) {
-                Ok(input_share) => {
-                    // Proof is OK. Accumulate this share and send helper
-                    // verifier share to leader so they can verify the proof
-                    // too.
-                    let interval_start = sub_request
-                        .timestamp
-                        .time
-                        .interval_start(self.parameters.min_batch_duration);
-                    if let Some(sum) = self.helper_state.accumulators.get_mut(&interval_start) {
-                        self.vdaf
-                            .accumulate(&(), &mut sum.accumulated, &input_share)?;
-                        sum.contributions += 1;
-                    } else {
-                        // This is the first input we have seen for this batch interval.
-                        // Initialize the accumulator.
-                        self.helper_state.accumulators.insert(
-                            interval_start,
-                            Accumulator {
-                                accumulated: input_share,
-                                contributions: 1,
-                                privacy_budget: 0,
-                            },
-                        );
-                    }
-                }
-                Err(e) => {
-                    let boxed_error: Box<dyn std::error::Error + 'static> = e.into();
-                    warn!(
-                        time = ?sub_request.timestamp,
-                        error = boxed_error.as_ref(),
-                        "proof did not check out for aggregate sub-request"
-                    );
-                }
-            }
+            self.aggregator.aggregate_report(
+                sub_request.timestamp,
+                step,
+                [helper_prepare_message.clone(), leader_prepare_message],
+            )?;
 
             sub_responses.push(VerifySubResponse {
                 timestamp: sub_request.timestamp,
-                verification_message: serde_json::to_vec(&helper_verifier_message)?,
+                verification_message: serde_json::to_vec(&helper_prepare_message)?,
             });
 
-            self.helper_state.last_timestamp_seen = sub_request.timestamp;
+            self.last_timestamp_seen = sub_request.timestamp;
         }
 
-        dump_accumulators(&self.helper_state.accumulators);
+        self.aggregator.dump_accumulators();
 
         Ok(VerifyResponse {
-            helper_state: serde_json::to_vec(&self.helper_state)?,
+            helper_state: serde_json::to_vec(&HelperState {
+                accumulators: self.aggregator.clone_accumulators(),
+                last_timestamp_seen: self.last_timestamp_seen,
+            })?,
             sub_responses,
         })
     }
@@ -255,78 +199,9 @@ impl Helper {
         &mut self,
         output_share_request: &OutputShareRequest,
     ) -> Result<EncryptedOutputShare, Error> {
-        if !self
-            .parameters
-            .validate_batch_interval(output_share_request.batch_interval)
-        {
-            return Err(Error::InvalidBatchInterval(
-                output_share_request.batch_interval,
-            ));
-        }
-
-        let num_intervals_in_request = output_share_request
-            .batch_interval
-            .min_intervals_in_interval(self.parameters.min_batch_duration);
-
-        let first_interval = output_share_request
-            .batch_interval
-            .start
-            .interval_start(self.parameters.min_batch_duration);
-
-        let mut output_shares = vec![];
-        let mut total_contributions = 0;
-
-        for i in 0..num_intervals_in_request {
-            let interval_start = Utc.timestamp(
-                first_interval.timestamp() + (i * self.parameters.min_batch_duration) as i64,
-                0,
-            );
-            info!(?interval_start);
-            match self.helper_state.accumulators.get_mut(&interval_start) {
-                Some(accumulator) => {
-                    if accumulator.privacy_budget == self.parameters.max_batch_lifetime {
-                        return Err(Error::PrivacyBudgetExceeded);
-                    }
-                    output_shares.push(accumulator.accumulated.clone());
-
-                    accumulator.privacy_budget += 1;
-                    total_contributions += accumulator.contributions;
-                }
-                None => {
-                    // Most likely there are no contributions for this batch interval yet
-                    warn!(
-                        "no accumulator found for interval start {:?}",
-                        interval_start
-                    );
-                    continue;
-                }
-            };
-        }
-
-        if total_contributions < self.parameters.min_batch_size {
-            return Err(Error::InsufficientBatchSize(total_contributions));
-        }
-
-        let output_share = OutputShare {
-            sum: self.vdaf.aggregate(&(), output_shares)?,
-            contributions: total_contributions,
-        };
-
-        let json_output_share = serde_json::to_vec(&output_share)?;
-
-        let hpke_sender = self
-            .parameters
-            .collector_config
-            .output_share_sender(&self.parameters.task_id, Role::Helper)?;
-
-        let (payload, encapped) = hpke_sender
-            .encrypt_output_share(output_share_request.batch_interval, &json_output_share)?;
-
-        Ok(EncryptedOutputShare {
-            collector_hpke_config_id: self.parameters.collector_config.id,
-            encapsulated_context: encapped.to_bytes().to_vec(),
-            payload,
-        })
+        Ok(self
+            .aggregator
+            .extract_output_share(output_share_request.batch_interval)?)
     }
 }
 
