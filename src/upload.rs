@@ -1,6 +1,6 @@
 //! The upload portion of the PPM protocol, per §3.3 of RFCXXXX
 
-use crate::{parameters::TaskId, Timestamp};
+use crate::{parameters::TaskId, Nonce};
 use derivative::Derivative;
 use serde::{Deserialize, Serialize};
 use std::io::Read;
@@ -19,7 +19,7 @@ pub enum Error {
 pub struct Report {
     pub task_id: TaskId,
     #[serde(flatten)]
-    pub timestamp: Timestamp,
+    pub timestamp: Nonce,
     pub extensions: Vec<ReportExtension>,
     pub encrypted_input_shares: Vec<EncryptedInputShare>,
 }
@@ -80,7 +80,7 @@ mod tests {
 {
     "task_id": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
     "time": 1001,
-    "nonce": 100,
+    "rand": 100,
     "extensions": [
         {
             "extension_type": "AuthenticationInformation",

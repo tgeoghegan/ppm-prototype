@@ -6,7 +6,7 @@ use crate::{
     hpke::{self, Role},
     parameters::{Parameters, TaskId},
     upload::{EncryptedInputShare, Report, ReportExtension},
-    with_shared_value, Interval, Timestamp,
+    with_shared_value, Interval, Nonce,
 };
 use color_eyre::eyre::Result;
 use http::StatusCode;
@@ -95,7 +95,7 @@ impl IntoHttpApiProblem for Error {
 /// In-memory representation of an input stored by the leader
 #[derive(Clone, Debug)]
 pub struct StoredInputShare<A: vdaf::Aggregator> {
-    pub timestamp: Timestamp,
+    pub timestamp: Nonce,
     pub leader_state: A::PrepareStep,
     pub leader_prepare_message: A::PrepareMessage,
     pub encrypted_helper_share: EncryptedInputShare,

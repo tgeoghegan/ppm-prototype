@@ -6,7 +6,7 @@ use crate::{
     hpke::Role,
     parameters::{Parameters, TaskId},
     upload::{EncryptedInputShare, ReportExtension},
-    Interval, Timestamp,
+    Interval, Nonce,
 };
 use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
@@ -62,7 +62,7 @@ pub struct VerifyStartRequest {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VerifyStartSubRequest {
     #[serde(flatten)]
-    pub timestamp: Timestamp,
+    pub timestamp: Nonce,
     pub extensions: Vec<ReportExtension>,
     // For prio3, this is a `serde_json` encoded `vdaf::VerifyMessage`. For
     // Hits, ???
@@ -82,7 +82,7 @@ pub struct VerifyResponse {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct VerifySubResponse {
     #[serde(flatten)]
-    pub timestamp: Timestamp,
+    pub timestamp: Nonce,
     // For prio3, this is a `serde_json` encoded `vdaf::VerifyMessage`. For
     // Hits, ???
     pub verification_message: Vec<u8>,
@@ -170,7 +170,7 @@ where
 
     pub(crate) fn prepare_message(
         &self,
-        timestamp: Timestamp,
+        timestamp: Nonce,
         input_share: &A::InputShare,
     ) -> Result<(A::PrepareStep, A::PrepareMessage), Error> {
         let step = self.aggregator.prepare_init(
@@ -185,7 +185,7 @@ where
 
     pub(crate) fn aggregate_report<I: IntoIterator<Item = A::PrepareMessage>>(
         &mut self,
-        timestamp: Timestamp,
+        timestamp: Nonce,
         step: A::PrepareStep,
         prepare_messages: I,
     ) -> Result<(), Error> {
@@ -243,7 +243,7 @@ where
         }
 
         let num_intervals_in_request =
-            batch_interval.min_intervals_in_interval(self.task_parameters.min_batch_duration);
+            batch_interval.intervals_in_interval(self.task_parameters.min_batch_duration);
 
         let first_interval = batch_interval
             .start
@@ -254,7 +254,7 @@ where
 
         for i in 0..num_intervals_in_request {
             let interval_start = Utc.timestamp(
-                first_interval.timestamp() + (i * self.task_parameters.min_batch_duration) as i64,
+                first_interval.timestamp() + (i * self.task_parameters.min_batch_duration.0) as i64,
                 0,
             );
             match self.accumulators.get_mut(&interval_start) {

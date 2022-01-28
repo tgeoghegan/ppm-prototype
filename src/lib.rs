@@ -13,7 +13,6 @@ use chrono::{DateTime, DurationRound, TimeZone, Utc};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 use std::{
-    cmp::Ordering,
     convert::Infallible,
     fmt::{self, Display, Formatter},
     path::PathBuf,
@@ -29,8 +28,12 @@ impl Time {
     /// assuming the provided minimum batch duration
     fn interval_start(self, min_batch_duration: Duration) -> DateTime<Utc> {
         Utc.timestamp(self.0 as i64, 0)
-            .duration_trunc(chrono::Duration::seconds(min_batch_duration as i64))
+            .duration_trunc(chrono::Duration::seconds(min_batch_duration.0 as i64))
             .unwrap()
+    }
+
+    fn add(self, duration: Duration) -> Self {
+        Self(self.0 + duration.0)
     }
 }
 
@@ -40,71 +43,67 @@ impl Display for Time {
     }
 }
 
-/// Timestamp as included in a Report, AggregateSubReq, etc.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize, Serialize)]
-pub struct Timestamp {
-    pub time: Time,
-    pub nonce: u64,
-}
+/// Seconds elapsed between two instances
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+pub struct Duration(pub u64);
 
-impl Ord for Timestamp {
-    fn cmp(&self, other: &Self) -> Ordering {
-        // Comparison per RFCXXXX §4.4.2
-        if other.time == self.time && other.nonce == self.nonce {
-            return Ordering::Equal;
-        }
-
-        if other.time > self.time || (other.time == self.time && other.nonce > self.nonce) {
-            return Ordering::Less;
-        }
-
-        Ordering::Greater
-    }
-}
-
-impl PartialOrd for Timestamp {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
-    }
-}
-
-impl Display for Timestamp {
+impl Display for Duration {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "{}.{}", self.time, self.nonce)
+        write!(f, "{}", self.0)
     }
 }
 
-impl Timestamp {
-    pub(crate) fn associated_data(&self) -> Vec<u8> {
-        [self.time.0.to_be_bytes(), self.nonce.to_be_bytes()].concat()
+/// Nonce used to uniquely identify a PPM report
+//
+// Deriving [`PartialOrd`] yields a "lexicographic ordering based on the
+// top-to-bottom declaration order of the struct's members."
+// https://doc.rust-lang.org/std/cmp/trait.PartialOrd.html#derivable
+#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Deserialize, Serialize)]
+pub struct Nonce {
+    /// Time at which the report was generated
+    pub time: Time,
+    /// Randomly generated value
+    pub rand: u64,
+}
+
+impl Display for Nonce {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        write!(f, "{}.{}", self.time, self.rand)
     }
 }
 
-/// Seconds elapsed between two instants
-pub type Duration = u64;
+impl Nonce {
+    /// Construct HPKE AEAD associated data for the nonce
+    pub fn associated_data(&self) -> Vec<u8> {
+        [self.time.0.to_be_bytes(), self.rand.to_be_bytes()].concat()
+    }
+}
 
-/// Interval of time between two instants.
+/// Interval of time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Interval {
     /// Start of the interval, included.
     pub start: Time,
-    /// End of the interval, excluded.
-    pub end: Time,
+    /// Length of the interval. `start + duration` is excluded.
+    pub duration: Duration,
 }
 
 impl Interval {
+    /// Construct the HPKE AEAD associated data for the interval.
     pub(crate) fn associated_data(&self) -> Vec<u8> {
-        [self.start.0.to_be_bytes(), self.end.0.to_be_bytes()].concat()
+        [self.start.0.to_be_bytes(), self.duration.0.to_be_bytes()].concat()
     }
 
-    pub(crate) fn min_intervals_in_interval(&self, min_batch_duration: Duration) -> u64 {
-        (self.end.0 - self.start.0) / min_batch_duration
+    /// Compute how many times an interval of length `duration` would fit in
+    /// this interval.
+    pub(crate) fn intervals_in_interval(&self, duration: Duration) -> u64 {
+        self.duration.0 / duration.0
     }
 }
 
 impl Display for Interval {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        write!(f, "[{} - {})", self.start, self.end)
+        write!(f, "[{} - {})", self.start, self.start.add(self.duration))
     }
 }
 

@@ -8,7 +8,7 @@ use ppm_prototype::{
     hpke,
     leader::run_leader,
     parameters::Parameters,
-    trace, Interval, Time,
+    trace, Duration, Interval, Time,
 };
 use serial_test::serial;
 use std::{io::Cursor, sync::Once};
@@ -88,7 +88,7 @@ async fn successful_aggregate() {
     // The interval should capture all inputs send by client
     let collect_interval = Interval {
         start: Time(INTERVAL_START),
-        end: Time(INTERVAL_START + 100),
+        duration: Duration(100),
     };
 
     // Successful collect
@@ -115,7 +115,7 @@ async fn insufficient_batch_size() {
         &test_case.hpke_config.collector,
         Interval {
             start: Time(INTERVAL_START),
-            end: Time(INTERVAL_START + 50),
+            duration: Duration(50),
         },
     )
     .await
@@ -137,7 +137,7 @@ async fn exceed_privacy_budget() {
     // The interval should capture all inputs send by client
     let collect_interval = Interval {
         start: Time(INTERVAL_START),
-        end: Time(INTERVAL_START + 100),
+        duration: Duration(100),
     };
 
     // Successful collect
@@ -179,7 +179,7 @@ async fn unaligned_batch_interval() {
         &test_case.hpke_config.collector,
         Interval {
             start: Time(INTERVAL_START),
-            end: Time(INTERVAL_START + 99),
+            duration: Duration(99),
         },
     )
     .await
@@ -204,7 +204,7 @@ async fn batch_interval_too_short() {
         &test_case.hpke_config.collector,
         Interval {
             start: Time(INTERVAL_START),
-            end: Time(INTERVAL_START + 25),
+            duration: Duration(25),
         },
     )
     .await
@@ -229,7 +229,7 @@ async fn invalid_helper_proof() {
         &test_case.hpke_config.collector,
         Interval {
             start: Time(INTERVAL_START),
-            end: Time(INTERVAL_START + 100),
+            duration: Duration(100),
         },
     )
     .await
@@ -257,7 +257,7 @@ async fn invalid_leader_proof() {
         &test_case.hpke_config.collector,
         Interval {
             start: Time(INTERVAL_START),
-            end: Time(INTERVAL_START + 100),
+            duration: Duration(100),
         },
     )
     .await

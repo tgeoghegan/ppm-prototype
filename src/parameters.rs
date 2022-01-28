@@ -112,11 +112,10 @@ impl Parameters {
     /// Returns true if the batch interval is aligned with and greater than the
     /// minimum batch duration
     pub(crate) fn validate_batch_interval(&self, batch_interval: Interval) -> bool {
-        batch_interval.end.0 - batch_interval.start.0 >= self.min_batch_duration
+        batch_interval.duration.0 >= self.min_batch_duration.0
             && batch_interval.start.interval_start(self.min_batch_duration)
                 == Utc.timestamp(batch_interval.start.0 as i64, 0)
-            && batch_interval.end.interval_start(self.min_batch_duration)
-                == Utc.timestamp(batch_interval.end.0 as i64, 0)
+            && batch_interval.duration.0 % self.min_batch_duration.0 == 0
     }
 }
 
@@ -203,7 +202,7 @@ mod tests {
             },
             max_batch_lifetime: 1,
             min_batch_size: 100,
-            min_batch_duration: 100000,
+            min_batch_duration: Duration(100000),
             vdaf: VdafLabel::Prio3Sum64 { bits: 64 },
         };
 

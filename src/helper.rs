@@ -6,7 +6,7 @@ use crate::{
     error::{handle_rejection, IntoHttpApiProblem, ProblemDocumentType},
     hpke::{self, Role},
     parameters::{Parameters, TaskId},
-    with_shared_value, Time, Timestamp,
+    with_shared_value, Nonce, Time,
 };
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::Result;
@@ -61,7 +61,7 @@ impl IntoHttpApiProblem for Error {
 #[derive(Debug, Serialize, Deserialize)]
 struct HelperState<S> {
     accumulators: HashMap<DateTime<Utc>, Accumulator<S>>,
-    last_timestamp_seen: Timestamp,
+    last_timestamp_seen: Nonce,
 }
 
 /// Implements endpoints for helper.
@@ -70,7 +70,7 @@ pub struct Helper {
     parameters: Parameters,
     hpke_config: hpke::Config,
     aggregator: Aggregator<Prio3Sum64>,
-    last_timestamp_seen: Timestamp,
+    last_timestamp_seen: Nonce,
 }
 
 impl Helper {
@@ -86,9 +86,9 @@ impl Helper {
                 // Start with empty state
                 HelperState {
                     accumulators: HashMap::new(),
-                    last_timestamp_seen: Timestamp {
+                    last_timestamp_seen: Nonce {
                         time: Time(0),
-                        nonce: 0,
+                        rand: 0,
                     },
                 }
             } else {

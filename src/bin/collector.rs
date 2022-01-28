@@ -3,7 +3,7 @@ use ppm_prototype::{
     collect::run_collect,
     hpke::{self, Role},
     parameters::Parameters,
-    trace, Interval, Time,
+    trace, Duration, Interval, Time,
 };
 
 #[tokio::main]
@@ -20,7 +20,7 @@ async fn main() -> Result<()> {
         &hpke_config,
         Interval {
             start: Time(1631907500),
-            end: Time(1631907500 + 100),
+            duration: Duration(100),
         },
     )
     .await?;

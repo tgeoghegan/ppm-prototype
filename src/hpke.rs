@@ -1,6 +1,6 @@
 use crate::{
     collect::EncryptedOutputShare, config_path, parameters::TaskId, upload::EncryptedInputShare,
-    Interval, Timestamp,
+    Interval, Nonce,
 };
 use ::hpke::{
     aead::{Aead, AeadCtxR, AeadCtxS, AesGcm128, AesGcm256, ChaCha20Poly1305},
@@ -404,7 +404,7 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
     /// this method consumes self.
     pub fn encrypt_input_share(
         mut self,
-        timestamp: Timestamp,
+        timestamp: Nonce,
         plaintext: &[u8],
     ) -> Result<(Vec<u8>, Encapsulate::EncappedKey), Error> {
         Ok((

@@ -2,7 +2,7 @@ use crate::{
     hpke::{self, Role},
     parameters::Parameters,
     upload::{EncryptedInputShare, Report},
-    Time, Timestamp,
+    Nonce, Time,
 };
 use ::hpke::Serializable;
 use http::StatusCode;
@@ -74,9 +74,9 @@ impl PpmClient {
     }
 
     pub async fn do_upload(&self, time: u64, input: u128) -> Result<(), Error> {
-        let timestamp = Timestamp {
+        let timestamp = Nonce {
             time: Time(time),
-            nonce: rand::random(),
+            rand: rand::random(),
         };
 
         // Generate a Prio input and proof. The serialized format is input share
