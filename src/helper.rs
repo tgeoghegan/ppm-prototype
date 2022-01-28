@@ -4,9 +4,9 @@ use crate::{
     aggregate::{Accumulator, Aggregator, VerifyResponse, VerifyStartRequest, VerifySubResponse},
     collect::{EncryptedOutputShare, OutputShareRequest},
     error::{handle_rejection, IntoHttpApiProblem, ProblemDocumentType},
-    hpke::{self, Role},
+    hpke,
     parameters::{Parameters, TaskId},
-    with_shared_value, Nonce, Time,
+    with_shared_value, Nonce, Role, Time,
 };
 use chrono::{DateTime, Utc};
 use color_eyre::eyre::Result;
@@ -96,7 +96,7 @@ impl Helper {
             };
 
         let aggregator = Aggregator::new(
-            hpke::Role::Helper,
+            Role::Helper,
             Prio3Sum64::new(Suite::Blake3, 2, 63)?,
             // TODO: lame that both structs own a copy of parameters
             parameters.clone(),

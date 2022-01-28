@@ -12,6 +12,7 @@ pub mod upload;
 use chrono::{DateTime, DurationRound, TimeZone, Utc};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
+use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::{
     convert::Infallible,
     fmt::{self, Display, Formatter},
@@ -104,6 +105,30 @@ impl Interval {
 impl Display for Interval {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "[{} - {})", self.start, self.start.add(self.duration))
+    }
+}
+
+/// The roles that protocol participants can adopt
+#[derive(Copy, Clone, Debug, Serialize_repr, Deserialize_repr, Eq, PartialEq)]
+#[repr(u8)]
+pub enum Role {
+    Collector = 0x00,
+    Client = 0x01,
+    Leader = 0x02,
+    Helper = 0x03,
+}
+
+impl Role {
+    /// Returns the index into protocol message vectors at which this role's
+    /// entry can be found. e.g., the leader's input share in a `Report` is
+    /// `Report.encrypted_input_shares[Role::Leader.index()]`.
+    pub fn index(self) -> usize {
+        // TODO: this doesn't make sense anymore
+        match self {
+            Role::Leader => 0,
+            Role::Helper => 1,
+            r => panic!("unexpected role {:?}", r),
+        }
     }
 }
 

@@ -1,9 +1,9 @@
 //! The collect portion of the PPM protocol, per §4.4 of RFCXXXX
 
 use crate::{
-    hpke::{self, Role},
+    hpke,
     parameters::{Parameters, TaskId},
-    Interval,
+    Interval, Role,
 };
 use derivative::Derivative;
 use http::{header::CONTENT_TYPE, StatusCode};

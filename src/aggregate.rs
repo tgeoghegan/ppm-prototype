@@ -3,10 +3,9 @@
 use crate::{
     collect::{EncryptedOutputShare, OutputShare},
     error::{IntoHttpApiProblem, ProblemDocumentType},
-    hpke::Role,
     parameters::{Parameters, TaskId},
     upload::{EncryptedInputShare, ReportExtension},
-    Interval, Nonce,
+    Interval, Nonce, Role,
 };
 use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};

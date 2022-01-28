@@ -1,9 +1,6 @@
 use color_eyre::eyre::Result;
 use ppm_prototype::{
-    collect::run_collect,
-    hpke::{self, Role},
-    parameters::Parameters,
-    trace, Duration, Interval, Time,
+    collect::run_collect, hpke, parameters::Parameters, trace, Duration, Interval, Role, Time,
 };
 
 #[tokio::main]

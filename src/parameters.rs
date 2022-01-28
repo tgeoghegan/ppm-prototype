@@ -3,11 +3,7 @@
 //! Provides structures and functionality for dealing with a `struct PPMParam`
 //! and related types.
 
-use crate::{
-    config_path,
-    hpke::{self, Role},
-    Duration, Interval,
-};
+use crate::{config_path, hpke, Duration, Interval, Role};
 use chrono::{TimeZone, Utc};
 use rand::{thread_rng, Rng};
 use reqwest::Client;

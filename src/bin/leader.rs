@@ -1,10 +1,5 @@
 use color_eyre::eyre::{Context, Result};
-use ppm_prototype::{
-    hpke::{self, Role},
-    leader::run_leader,
-    parameters::Parameters,
-    trace,
-};
+use ppm_prototype::{hpke, leader::run_leader, parameters::Parameters, trace, Role};
 
 #[tokio::main]
 async fn main() -> Result<()> {

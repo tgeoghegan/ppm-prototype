@@ -1,6 +1,6 @@
 use crate::{
     collect::EncryptedOutputShare, config_path, parameters::TaskId, upload::EncryptedInputShare,
-    Interval, Nonce,
+    Interval, Nonce, Role,
 };
 use ::hpke::{
     aead::{Aead, AeadCtxR, AeadCtxS, AesGcm128, AesGcm256, ChaCha20Poly1305},
@@ -27,27 +27,6 @@ pub enum Error {
     InvalidConfiguration(&'static str),
     #[error("file error: {1}")]
     File(#[source] std::io::Error, PathBuf),
-}
-
-#[derive(Copy, Clone, Debug, Serialize_repr, Deserialize_repr, Eq, PartialEq)]
-#[repr(u8)]
-pub enum Role {
-    Leader = 0x00,
-    Helper = 0x01,
-    Collector = 0x02,
-}
-
-impl Role {
-    /// Returns the index into protocol message vectors at which this role's
-    /// entry can be found. e.g., the leader's input share in a `Report` is
-    /// `Report.encrypted_input_shares[Role::Leader.role_index()]`.
-    pub fn index(self) -> usize {
-        match self {
-            Role::Leader => 0,
-            Role::Helper => 1,
-            Role::Collector => 2,
-        }
-    }
 }
 
 /// Configuration file containing multiple HPKE configs
@@ -107,6 +86,11 @@ impl Config {
             Role::Helper => config_file.helper,
             Role::Leader => config_file.leader,
             Role::Collector => config_file.collector,
+            Role::Client => {
+                return Err(Error::InvalidConfiguration(
+                    "can't get HPKE config for client role",
+                ));
+            }
         };
 
         Ok(config)

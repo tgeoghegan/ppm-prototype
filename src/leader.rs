@@ -3,10 +3,10 @@ use crate::{
     aggregate::{Aggregator, VerifyResponse, VerifyStartRequest, VerifyStartSubRequest},
     collect::{CollectRequest, CollectResponse, EncryptedOutputShare, OutputShareRequest},
     error::{handle_rejection, response_to_api_problem, IntoHttpApiProblem, ProblemDocumentType},
-    hpke::{self, Role},
+    hpke,
     parameters::{Parameters, TaskId},
     upload::{EncryptedInputShare, Report, ReportExtension},
-    with_shared_value, Interval, Nonce,
+    with_shared_value, Interval, Nonce, Role,
 };
 use color_eyre::eyre::Result;
 use http::StatusCode;
