@@ -206,7 +206,7 @@ impl Helper {
 }
 
 pub async fn run_helper(ppm_parameters: Parameters, hpke_config: hpke::Config) -> Result<()> {
-    let port = ppm_parameters.aggregator_urls[Role::Helper.index()]
+    let port = ppm_parameters.aggregator_endpoints[Role::Helper.index()]
         .port()
         .unwrap_or(80);
 

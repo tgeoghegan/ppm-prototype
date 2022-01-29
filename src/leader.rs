@@ -356,7 +356,7 @@ impl Leader {
 }
 
 pub async fn run_leader(ppm_parameters: Parameters, hpke_config: hpke::Config) -> Result<()> {
-    let port = ppm_parameters.aggregator_urls[Role::Leader.index()]
+    let port = ppm_parameters.aggregator_endpoints[Role::Leader.index()]
         .port()
         .unwrap_or(80);
     let hpke_config_endpoint = hpke_config.warp_endpoint();
