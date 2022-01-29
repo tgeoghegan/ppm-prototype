@@ -124,12 +124,12 @@ impl PpmClient {
             task_id: self.parameters.task_id,
             encrypted_input_shares: vec![
                 EncryptedInputShare {
-                    aggregator_config_id: self.leader_hpke_config.id,
+                    aggregator_config_id: self.leader_hpke_config.id.0,
                     encapsulated_context: leader_encapped_key.to_bytes().to_vec(),
                     payload: leader_payload,
                 },
                 EncryptedInputShare {
-                    aggregator_config_id: self.helper_hpke_config.id,
+                    aggregator_config_id: self.helper_hpke_config.id.0,
                     encapsulated_context: helper_encapped_key.to_bytes().to_vec(),
                     payload: helper_payload,
                 },

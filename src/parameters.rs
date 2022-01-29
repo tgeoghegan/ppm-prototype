@@ -183,7 +183,7 @@ mod tests {
                 "https://helper.fake".try_into().unwrap(),
             ],
             collector_config: hpke::Config {
-                id: 1,
+                id: hpke::ConfigId(1),
                 kem_id: hpke::KeyEncapsulationMechanism::X25519HkdfSha256,
                 kdf_id: hpke::KeyDerivationFunction::HkdfSha256,
                 aead_id: hpke::AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305,

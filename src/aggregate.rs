@@ -306,7 +306,7 @@ where
             hpke_sender.encrypt_output_share(batch_interval, &json_output_share)?;
 
         Ok(EncryptedOutputShare {
-            collector_hpke_config_id: self.task_parameters.collector_config.id,
+            collector_hpke_config_id: self.task_parameters.collector_config.id.0,
             encapsulated_context: encapped.to_bytes().to_vec(),
             payload,
         })

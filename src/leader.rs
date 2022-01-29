@@ -172,7 +172,7 @@ impl Leader {
 
         let leader_share = &report.encrypted_input_shares[Role::Leader.index()];
 
-        if leader_share.aggregator_config_id != self.hpke_config.id {
+        if leader_share.aggregator_config_id != self.hpke_config.id.0 {
             return Err(Error::UnknownHpkeConfig(leader_share.aggregator_config_id));
         }
 

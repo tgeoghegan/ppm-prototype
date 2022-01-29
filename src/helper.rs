@@ -139,7 +139,7 @@ impl Helper {
                 continue;
             }
 
-            if sub_request.helper_share.aggregator_config_id != self.hpke_config.id {
+            if sub_request.helper_share.aggregator_config_id != self.hpke_config.id.0 {
                 return Err(Error::UnknownHpkeConfig(
                     sub_request.helper_share.aggregator_config_id,
                 ));

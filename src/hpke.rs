@@ -8,6 +8,7 @@ use ::hpke::{
     kem::{DhP256HkdfSha256, X25519HkdfSha256},
     setup_receiver, setup_sender, Deserializable, HpkeError, Kem, OpModeR, OpModeS, Serializable,
 };
+use derivative::Derivative;
 use http::StatusCode;
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
@@ -27,6 +28,25 @@ pub enum Error {
     InvalidConfiguration(&'static str),
     #[error("file error: {1}")]
     File(#[source] std::io::Error, PathBuf),
+}
+
+/// Identifier for an HPKE configuration
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ConfigId(pub u8);
+
+/// An HPKE ciphertext
+#[derive(Clone, Derivative, Serialize, Deserialize)]
+#[derivative(Debug)]
+pub struct Ciphertext {
+    /// Identifier of the HPKE configuration used to seal the message
+    config_id: ConfigId,
+    /// Encasulated HPKE context
+    #[serde(rename = "enc")]
+    #[derivative(Debug = "ignore")]
+    encapsulated_context: Vec<u8>,
+    /// Ciphertext
+    #[derivative(Debug = "ignore")]
+    payload: Vec<u8>,
 }
 
 /// Configuration file containing multiple HPKE configs
@@ -51,7 +71,7 @@ impl ConfigFile {
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Config {
     /// Identifier of the HPKE configuration
-    pub id: u8,
+    pub id: ConfigId,
     pub(crate) kem_id: KeyEncapsulationMechanism,
     pub(crate) kdf_id: KeyDerivationFunction,
     pub(crate) aead_id: AuthenticatedEncryptionWithAssociatedData,
@@ -127,7 +147,7 @@ impl Config {
         };
 
         Config {
-            id: 0,
+            id: ConfigId(0),
             kem_id: kem,
             kdf_id: kdf,
             aead_id: aead,
@@ -206,6 +226,7 @@ impl Config {
         self.supported_configuration()?;
 
         Sender::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
+            self.id,
             &Self::report_application_info(task_id, recipient_role),
             &self.public_key,
         )
@@ -244,6 +265,7 @@ impl Config {
         self.supported_configuration()?;
 
         Sender::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
+            self.id,
             &Self::output_share_application_info(task_id, sender_role),
             &self.public_key,
         )
@@ -346,6 +368,7 @@ pub type DefaultSender =
 /// An HPKE sender that encrypts messages to some recipient public key using
 /// a chosen set of AEAD, key derivation and key encapsulation algorithms.
 pub struct Sender<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> {
+    config_id: ConfigId,
     encapped_key: Encapsulate::EncappedKey,
     context: AeadCtxS<Encrypt, Derive, Encapsulate>,
 }
@@ -355,6 +378,7 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
     /// recipient public key, entangling the provided application info into the
     /// context construction.)
     pub fn new(
+        config_id: ConfigId,
         application_info: &[u8],
         serialized_recipient_public_key: &[u8],
     ) -> Result<Self, Error> {
@@ -373,6 +397,7 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
         )?;
 
         Ok(Self {
+            config_id,
             encapped_key,
             context,
         })
@@ -392,7 +417,7 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
         plaintext: &[u8],
     ) -> Result<(Vec<u8>, Encapsulate::EncappedKey), Error> {
         Ok((
-            self.seal(plaintext, &timestamp.associated_data())?,
+            self.seal2(plaintext, &timestamp.associated_data())?,
             self.encapped_key,
         ))
     }
@@ -403,12 +428,21 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
         plaintext: &[u8],
     ) -> Result<(Vec<u8>, Encapsulate::EncappedKey), Error> {
         Ok((
-            self.seal(plaintext, &batch_interval.associated_data())?,
+            self.seal2(plaintext, &batch_interval.associated_data())?,
             self.encapped_key,
         ))
     }
 
-    fn seal(&mut self, plaintext: &[u8], associated_data: &[u8]) -> Result<Vec<u8>, Error> {
+    pub fn seal(&mut self, plaintext: &[u8], associated_data: &[u8]) -> Result<Ciphertext, Error> {
+        Ok(Ciphertext {
+            config_id: self.config_id,
+            encapsulated_context: self.encapped_key.to_bytes().to_vec(),
+            payload: self.context.seal(plaintext, associated_data)?,
+        })
+    }
+
+    // TODO: Delete this once struct Report, etc. are updated
+    fn seal2(&mut self, plaintext: &[u8], associated_data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(self.context.seal(plaintext, associated_data)?)
     }
 }
@@ -457,7 +491,7 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
         encrypted_input_share: &EncryptedInputShare,
         associated_data: &[u8],
     ) -> Result<Vec<u8>, Error> {
-        self.open(&encrypted_input_share.payload, associated_data)
+        self.open2(&encrypted_input_share.payload, associated_data)
     }
 
     pub fn decrypt_output_share(
@@ -465,13 +499,22 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
         encrypted_output_share: &EncryptedOutputShare,
         batch_interval: Interval,
     ) -> Result<Vec<u8>, Error> {
-        self.open(
+        self.open2(
             &encrypted_output_share.payload,
             &batch_interval.associated_data(),
         )
     }
 
-    fn open(&mut self, ciphertext: &[u8], associated_data: &[u8]) -> Result<Vec<u8>, Error> {
+    pub fn open(
+        &mut self,
+        ciphertext: &Ciphertext,
+        associated_data: &[u8],
+    ) -> Result<Vec<u8>, Error> {
+        Ok(self.context.open(&ciphertext.payload, associated_data)?)
+    }
+
+    //TODO: delete this once I clean up Report, etc.
+    fn open2(&mut self, ciphertext: &[u8], associated_data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(self.context.open(ciphertext, associated_data)?)
     }
 }
@@ -509,6 +552,7 @@ mod tests {
                 KeyDerivationFunction::HkdfSha256,
                 AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305,
             ) => Sender::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
+                config.id,
                 application_info,
                 &config.public_key,
             )
