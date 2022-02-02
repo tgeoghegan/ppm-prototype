@@ -25,7 +25,10 @@ use std::{
 };
 use tokio::sync::Mutex;
 use tracing::{debug, error, info};
-use warp::{reply, Filter};
+use warp::{
+    reply::{self, Json},
+    Filter, Rejection,
+};
 
 static LEADER_USER_AGENT: &str = concat!(
     env!("CARGO_PKG_NAME"),
@@ -187,8 +190,7 @@ impl Leader {
         let decrypted_input_share = hpke_recipient
             .decrypt_input_share(leader_share, &report.timestamp.associated_data())?;
 
-        let input_share_message: <Prio3Sum64 as Vdaf>::InputShare =
-            serde_json::from_slice(&decrypted_input_share)?;
+        let input_share_message: <Prio3Sum64 as Vdaf>::InputShare = todo!(); //            serde_json::from_slice(&decrypted_input_share)?;
 
         let (step, leader_prepare_message) = self
             .aggregator
@@ -234,7 +236,7 @@ impl Leader {
                 Ok(VerifyStartSubRequest {
                     timestamp: stored_input.timestamp,
                     extensions: stored_input.extensions.clone(),
-                    verify_message: serde_json::to_vec(&stored_input.leader_prepare_message)?,
+                    verify_message: todo!(), //serde_json::to_vec(&stored_input.leader_prepare_message)?,
                     helper_share: stored_input.encrypted_helper_share.clone(),
                 })
             })
@@ -250,7 +252,8 @@ impl Leader {
         let http_response = self
             .http_client
             .post(self.parameters.aggregate_endpoint()?)
-            .json(&aggregate_request)
+            .body("todo")
+            //.json(&aggregate_request)
             .send()
             .await?;
         let http_response_status = http_response.status();
@@ -269,7 +272,7 @@ impl Leader {
         // method, so reinitialize the leader's unaggregated inputs to empty.
         let leader_inputs = std::mem::take(&mut self.unaggregated_inputs);
 
-        let aggregate_response: VerifyResponse = http_response.json().await?;
+        let aggregate_response: VerifyResponse = todo!(); // http_response.json().await?;
 
         if leader_inputs.len() != aggregate_response.sub_responses.len() {
             return Err(Error::AggregateProtocol(format!(
@@ -293,8 +296,7 @@ impl Leader {
             }
 
             // TODO: make this generic over Vdaf
-            let helper_verifier_message: <Prio3Sum64 as vdaf::Aggregator>::PrepareMessage =
-                serde_json::from_slice(&helper_response.verification_message)?;
+            let helper_verifier_message: <Prio3Sum64 as vdaf::Aggregator>::PrepareMessage = todo!(); //                serde_json::from_slice(&helper_response.verification_message)?;
 
             self.aggregator.aggregate_report(
                 leader_input.timestamp,
@@ -331,7 +333,8 @@ impl Leader {
         let http_response = self
             .http_client
             .post(self.parameters.output_share_endpoint()?)
-            .json(&output_share_request)
+            .body("todo")
+            //.json(&output_share_request)
             .send()
             .await?;
         let http_response_status = http_response.status();
@@ -343,7 +346,7 @@ impl Leader {
             };
         }
 
-        let helper_encrypted_output_share: EncryptedOutputShare = http_response.json().await?;
+        let helper_encrypted_output_share: EncryptedOutputShare = todo!(); //http_response.json().await?;
 
         let leader_output_share = self
             .aggregator
@@ -355,49 +358,53 @@ impl Leader {
     }
 }
 
+#[tracing::instrument(err)]
 pub async fn run_leader(ppm_parameters: Parameters, hpke_config: hpke::Config) -> Result<()> {
     let port = ppm_parameters.aggregator_endpoints[Role::Leader.index()]
         .port()
         .unwrap_or(80);
-    let hpke_config_endpoint = hpke_config.warp_endpoint();
+    let hpke_config_endpoint = hpke_config.warp_endpoint()?;
 
-    let leader_aggregator = Arc::new(Mutex::new(Leader::new(&ppm_parameters, &hpke_config)?));
+    //let leader_aggregator = Arc::new(Mutex::new(Leader::new(&ppm_parameters, &hpke_config)?));
 
-    let upload = warp::post()
-        .and(warp::path("upload"))
-        .and(warp::body::json())
-        .and(with_shared_value(leader_aggregator.clone()))
-        .and_then(|report: Report, leader: Arc<Mutex<Leader>>| async move {
-            let mut leader = leader.lock().await;
-            match leader.handle_upload(&report).await {
-                Ok(()) => Ok(reply::with_status(reply(), StatusCode::OK)),
-                Err(e) => Err(warp::reject::custom(
-                    e.problem_document(&leader.parameters, "upload"),
-                )),
-            }
-        })
-        .with(warp::trace::named("upload"));
+    // let upload = warp::post()
+    //     .and(warp::path("upload"))
+    //     .and(warp::body::json())
+    //     .and(with_shared_value(leader_aggregator.clone()))
+    //     .and_then(|report: Report, leader: Arc<Mutex<Leader>>| async move {
+    //         let mut leader = leader.lock().await;
+    //         leader.handle_upload(&report).await.map_err(|e| {
+    //             warp::reject::custom(e.problem_document(Some(&leader.parameters), "upload"))
+    //         })?;
+    //         Ok(reply::with_status(warp::reply(), StatusCode::OK)) as Result<_, Rejection>
+    //     })
+    //     .with(warp::trace::named("upload"));
 
-    let collect = warp::post()
-        .and(warp::path("collect"))
-        .and(warp::body::json())
-        .and(with_shared_value(leader_aggregator.clone()))
-        .and_then(
-            |collect_request: CollectRequest, leader: Arc<Mutex<Leader>>| async move {
-                let mut leader = leader.lock().await;
-                match leader.handle_collect(&collect_request).await {
-                    Ok(response) => Ok(reply::with_status(reply::json(&response), StatusCode::OK)),
-                    Err(e) => Err(warp::reject::custom(
-                        e.problem_document(&leader.parameters, "collect"),
-                    )),
-                }
-            },
-        )
-        .with(warp::trace::named("collect"));
+    // let collect = warp::post()
+    //     .and(warp::path("collect"))
+    //     // .and({
+    //     //     warp::body::json()
+    //     // })
+    //     .and(with_shared_value(leader_aggregator.clone()))
+    //     .and_then(
+    //         |/*collect_request: CollectRequest,*/ leader: Arc<Mutex<Leader>>| async move {
+    //             let collect_request = todo!();
+    //             let mut leader = leader.lock().await;
+    //             let response = leader.handle_collect(&collect_request).await.map_err(|e| {
+    //                 warp::reject::custom(e.problem_document(Some(&leader.parameters), "collect"))
+    //             })?;
+    //             let todo: Json = todo!();
+    //             Ok(reply::with_status(
+    //                 todo, /*reply::json(&response)*/
+    //                 StatusCode::OK,
+    //             )) as Result<_, Rejection>
+    //         },
+    //     )
+    //     .with(warp::trace::named("collect"));
 
     let routes = hpke_config_endpoint
-        .or(upload)
-        .or(collect)
+        // .or(upload)
+        // .or(collect)
         .recover(handle_rejection)
         .with(warp::trace::request());
 

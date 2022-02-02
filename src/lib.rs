@@ -1,5 +1,6 @@
 pub mod aggregate;
 pub mod client;
+mod codec;
 pub mod collect;
 mod error;
 pub mod helper;
@@ -144,4 +145,39 @@ pub fn with_shared_value<T: Clone + Sync + Send>(
     value: T,
 ) -> impl Filter<Extract = (T,), Error = Infallible> + Clone {
     warp::any().map(move || value.clone())
+}
+
+mod base64 {
+    //! Custom serialization module used to serialize byte sequences to base64
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize_bytes<V: AsRef<[u8]>, S: Serializer>(v: &V, s: S) -> Result<S::Ok, S::Error> {
+        String::serialize(&base64::encode(&v), s)
+    }
+
+    pub fn deserialize_bytes<'de, D: Deserializer<'de>, V: From<Vec<u8>>>(
+        d: D,
+    ) -> Result<V, D::Error> {
+        let bytes = base64::decode(String::deserialize(d)?.as_bytes()).map_err(Error::custom)?;
+        let v = V::from(bytes);
+        Ok(v)
+    }
+
+    pub fn serialize_bytes_option<V: AsRef<[u8]>, S: Serializer>(
+        v: &Option<V>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(v) => String::serialize(&base64::encode(&v), s),
+            None => <Option<Vec<u8>>>::serialize(&None, s),
+        }
+    }
+
+    pub fn deserialize_bytes_option<'de, D: Deserializer<'de>, V: From<Vec<u8>>>(
+        d: D,
+    ) -> Result<Option<V>, D::Error> {
+        let bytes = base64::decode(String::deserialize(d)?.as_bytes()).map_err(Error::custom)?;
+        let v = V::from(bytes);
+        Ok(Some(v))
+    }
 }

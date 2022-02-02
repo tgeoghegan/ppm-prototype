@@ -11,6 +11,7 @@ use prio::vdaf::{
     suite::{Key, Suite},
     Client,
 };
+use tracing::info;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -51,6 +52,7 @@ pub struct PpmClient {
 }
 
 impl PpmClient {
+    #[tracing::instrument(err)]
     pub async fn new(ppm_parameters: &Parameters) -> Result<Self, Error> {
         let http_client = reqwest::Client::builder()
             .user_agent(CLIENT_USER_AGENT)
@@ -61,6 +63,8 @@ impl PpmClient {
         let helper_hpke_config = ppm_parameters
             .hpke_config(Role::Helper, &http_client)
             .await?;
+
+        info!(?leader_hpke_config);
 
         Ok(Self {
             http_client,
@@ -101,8 +105,8 @@ impl PpmClient {
         // these explicit serde_json::to_vec calls. This is probably brittle because
         // we're depending on Serde to emit a "canonical" JSON encoding of a
         // message.
-        let json_leader_share = serde_json::to_vec(&upload_messages[Role::Leader.index()])?;
-        let json_helper_share = serde_json::to_vec(&upload_messages[Role::Helper.index()])?;
+        let json_leader_share: &[u8] = todo!(); //serde_json::to_vec(&upload_messages[Role::Leader.index()])?;
+        let json_helper_share: &[u8] = todo!(); //serde_json::to_vec(&upload_messages[Role::Helper.index()])?;
 
         // We have to create a new HPKE context for each message, or the nonces
         // won't line up with the recipient.

@@ -42,12 +42,17 @@ pub(crate) trait IntoHttpApiProblem: Error {
     /// endpoint
     fn problem_document(
         &self,
-        ppm_parameters: &Parameters,
+        ppm_parameters: Option<&Parameters>,
         endpoint: &'static str,
     ) -> HttpApiProblem {
         if let Some(source_document) = self.source_problem_document() {
             return source_document.clone().instance(endpoint);
         }
+
+        let task_id = match ppm_parameters {
+            Some(ppm_parameters) => ppm_parameters.task_id.to_string(),
+            None => "unknown".to_string(),
+        };
 
         match self.problem_document_type() {
             Some(problem_document_type) => {
@@ -57,7 +62,7 @@ pub(crate) trait IntoHttpApiProblem: Error {
                 .type_url(ProblemDocumentType::UnknownError),
         }
         .detail(self.to_string())
-        .value("taskid", &ppm_parameters.task_id.to_string())
+        .value("taskid", &task_id)
         .instance(endpoint)
     }
 

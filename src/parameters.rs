@@ -6,10 +6,17 @@
 use crate::{config_path, hpke, Duration, Interval, Role};
 use chrono::{TimeZone, Utc};
 use hex::FromHex;
+use prio::codec::Decode;
 use rand::{thread_rng, Rng};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{convert::AsRef, fmt::Display, fs::File, io::Read, path::PathBuf};
+use std::{
+    convert::AsRef,
+    fmt::Display,
+    fs::File,
+    io::{Cursor, Read},
+    path::PathBuf,
+};
 use url::Url;
 
 #[derive(Debug, thiserror::Error)]
@@ -22,6 +29,8 @@ pub enum Error {
     Reqwest(#[from] reqwest::Error),
     #[error("file error: {1}")]
     File(#[source] std::io::Error, PathBuf),
+    #[error("HPKE error")]
+    Hpke(#[from] hpke::Error),
 }
 
 /// The configuration parameters for a PPM task, corresponding to
@@ -82,13 +91,17 @@ impl Parameters {
         role: Role,
         http_client: &Client,
     ) -> Result<hpke::Config, Error> {
-        let hpke_config = http_client
+        let body_bytes = http_client
             .get(self.hpke_config_endpoint(role)?)
             .send()
             .await?
-            .json()
+            .bytes()
             .await?;
-        Ok(hpke_config)
+
+        Ok(hpke::Config::decode(
+            &(),
+            &mut Cursor::new(body_bytes.as_ref()),
+        )?)
     }
 
     pub fn upload_endpoint(&self) -> Result<Url, Error> {
@@ -185,14 +198,14 @@ mod tests {
                 kem_id: hpke::KeyEncapsulationMechanism::X25519HkdfSha256,
                 kdf_id: hpke::KeyDerivationFunction::HkdfSha256,
                 aead_id: hpke::AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305,
-                public_key: vec![
+                public_key: hpke::PublicKey::new(vec![
                     3, 20, 3, 245, 218, 218, 141, 106, 244, 32, 137, 7, 239, 142, 236, 187, 223,
                     40, 226, 20, 103, 206, 127, 111, 201, 43, 163, 129, 97, 74, 254, 75,
-                ],
-                private_key: Some(vec![
+                ]),
+                private_key: Some(hpke::PrivateKey::new(vec![
                     200, 136, 138, 82, 174, 13, 162, 51, 213, 94, 11, 15, 141, 167, 166, 44, 216,
                     99, 180, 36, 212, 230, 85, 89, 67, 139, 199, 181, 108, 134, 250, 89,
-                ]),
+                ])),
             },
             max_batch_lifetime: 1,
             min_batch_size: 100,

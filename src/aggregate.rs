@@ -10,7 +10,8 @@ use crate::{
 use ::hpke::Serializable;
 use chrono::{DateTime, TimeZone, Utc};
 use prio::vdaf::{
-    self, poplar1::Poplar1VerifyParam, prio3::Prio3VerifyParam, suite::Key, Aggregatable, Vdaf,
+    self, /*poplar1::Poplar1VerifyParam,*/ prio3::Prio3VerifyParam, suite::Key, Aggregatable,
+    Vdaf,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, fmt::Debug};
@@ -46,21 +47,18 @@ impl IntoHttpApiProblem for Error {
 }
 
 /// A verify start request sent to a leader from a helper
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 pub struct VerifyStartRequest {
     pub task_id: TaskId,
     pub helper_state: Vec<u8>,
     // Aggregation parameter is not used in prio3
-    #[serde(skip_serializing_if = "Option::is_none", rename = "aggregation_param")]
     pub aggregation_parameter: Option<Vec<u8>>,
-    #[serde(rename = "seq")]
     pub sub_requests: Vec<VerifyStartSubRequest>,
 }
 
 /// Sub-request in a verify start request
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 pub struct VerifyStartSubRequest {
-    #[serde(flatten)]
     pub timestamp: Nonce,
     pub extensions: Vec<ReportExtension>,
     // For prio3, this is a `serde_json` encoded `vdaf::VerifyMessage`. For
@@ -71,16 +69,15 @@ pub struct VerifyStartSubRequest {
 
 /// The response to a verify start request (and verify next, but that is not
 /// used in prio3)
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 pub struct VerifyResponse {
     pub helper_state: Vec<u8>,
     pub sub_responses: Vec<VerifySubResponse>,
 }
 
 /// Sub-response in a verify response
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug)]
 pub struct VerifySubResponse {
-    #[serde(flatten)]
     pub timestamp: Nonce,
     // For prio3, this is a `serde_json` encoded `vdaf::VerifyMessage`. For
     // Hits, ???
@@ -88,7 +85,7 @@ pub struct VerifySubResponse {
 }
 
 /// Accumulator for some aggregation interval
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
 pub(crate) struct Accumulator<S> {
     /// The value accumulated thus far. S will be some VDAF's AggregateShare type.
     pub(crate) accumulated: S,
@@ -126,11 +123,11 @@ impl DefaultVerifyParam for Prio3VerifyParam {
     }
 }
 
-impl DefaultVerifyParam for Poplar1VerifyParam {
-    fn default(role: Role) -> Self {
-        Self::new(&Key::Blake3([1; 32]), role == Role::Leader)
-    }
-}
+// impl DefaultVerifyParam for Poplar1VerifyParam {
+//     fn default(role: Role) -> Self {
+//         Self::new(&Key::Blake3([1; 32]), role == Role::Leader)
+//     }
+// }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Aggregator<A: vdaf::Aggregator> {
@@ -295,7 +292,7 @@ where
         };
 
         // TODO use TLS serialization
-        let json_output_share = serde_json::to_vec(&output_share)?;
+        let json_output_share: &[u8] = todo!(); //serde_json::to_vec(&output_share)?;
 
         let hpke_sender = self
             .task_parameters

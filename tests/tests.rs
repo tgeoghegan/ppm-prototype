@@ -13,6 +13,7 @@ use ppm_prototype::{
 use serial_test::serial;
 use std::{io::Cursor, sync::Once};
 use tokio::task::JoinHandle;
+use tracing::info;
 
 const INTERVAL_START: u64 = 1631907500;
 

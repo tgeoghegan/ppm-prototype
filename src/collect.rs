@@ -14,7 +14,6 @@ use prio::vdaf::{
     Collector, Vdaf,
 };
 use reqwest::{Client, Response};
-use serde::{Deserialize, Serialize};
 use tracing::info;
 
 static COLLECTOR_USER_AGENT: &str = concat!(
@@ -49,30 +48,21 @@ pub enum Error {
 }
 
 /// A collect request sent to a leader from a collector.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollectRequest {
     pub task_id: TaskId,
     pub batch_interval: Interval,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "aggregation_param")]
     pub aggregation_parameter: Option<Vec<u8>>,
 }
 
-/// The protocol specific portions of CollectRequest
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub enum ProtocolCollectFields {
-    /// Prio-specific parameters
-    Prio {},
-    Hits {},
-}
-
 /// The response to a collect request
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollectResponse {
     pub encrypted_output_shares: Vec<EncryptedOutputShare>,
 }
 
 /// Output share request from leader to helper
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OutputShareRequest {
     pub task_id: TaskId,
     pub batch_interval: Interval,
@@ -80,20 +70,17 @@ pub struct OutputShareRequest {
 }
 
 /// An output share, sent from an aggregator to the collector
-#[derive(Clone, Debug, Derivative, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Debug, Derivative, PartialEq, Eq)]
 pub struct OutputShare<V: Vdaf> {
-    // Workaround for alleged compiler bug: https://github.com/serde-rs/serde/issues/1296
-    #[serde(deserialize_with = "V::AggregateShare::deserialize")]
     pub sum: V::AggregateShare,
     pub contributions: u64,
 }
 
 /// An encrypted output share, sent from an aggregator to the collector
-#[derive(Clone, Derivative, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Clone, Derivative, PartialEq, Eq)]
 #[derivative(Debug)]
 pub struct EncryptedOutputShare {
     pub collector_hpke_config_id: u8,
-    #[serde(rename = "enc")]
     #[derivative(Debug = "ignore")]
     pub encapsulated_context: Vec<u8>,
     /// This is understood to be ciphertext || tag
@@ -119,7 +106,8 @@ pub async fn run_collect(
 
     let collect_response = http_client
         .post(ppm_parameters.collect_endpoint()?)
-        .json(&collect_request)
+        .body("foo")
+        // TODO serialize .json(todo!()) //&collect_request)
         .send()
         .await?;
 
@@ -137,7 +125,7 @@ pub async fn run_collect(
         }
     }
 
-    let collect_response_body: CollectResponse = collect_response.json().await?;
+    let collect_response_body: CollectResponse = todo!(); //collect_response.json().await?;
     let leader_recipient = hpke_config.output_share_recipient(
         &ppm_parameters.task_id,
         Role::Leader,
@@ -145,22 +133,22 @@ pub async fn run_collect(
     )?;
 
     // TODO: make this generic over Vdaf
-    let decrypted_leader_share: OutputShare<Prio3Sum64> =
-        serde_json::from_slice(&leader_recipient.decrypt_output_share(
-            &collect_response_body.encrypted_output_shares[Role::Leader.index()],
-            batch_interval,
-        )?)?;
+    let decrypted_leader_share: OutputShare<Prio3Sum64> = todo!();
+    // serde_json::from_slice(&leader_recipient.decrypt_output_share(
+    //     &collect_response_body.encrypted_output_shares[Role::Leader.index()],
+    //     batch_interval,
+    // )?)?;
 
     let helper_recipient = hpke_config.output_share_recipient(
         &ppm_parameters.task_id,
         Role::Helper,
         &collect_response_body.encrypted_output_shares[Role::Helper.index()].encapsulated_context,
     )?;
-    let decrypted_helper_share: OutputShare<Prio3Sum64> =
-        serde_json::from_slice(&helper_recipient.decrypt_output_share(
-            &collect_response_body.encrypted_output_shares[Role::Helper.index()],
-            batch_interval,
-        )?)?;
+    let decrypted_helper_share: OutputShare<Prio3Sum64> = todo!();
+    // serde_json::from_slice(&helper_recipient.decrypt_output_share(
+    //     &collect_response_body.encrypted_output_shares[Role::Helper.index()],
+    //     batch_interval,
+    // )?)?;
 
     if decrypted_leader_share.contributions != decrypted_helper_share.contributions {
         return Err(Error::LengthMismatch(

@@ -20,7 +20,10 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
 };
 use tracing::{error, info, warn};
-use warp::{reply, Filter};
+use warp::{
+    reply::{self, Json},
+    Filter, Rejection,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -58,7 +61,7 @@ impl IntoHttpApiProblem for Error {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug)]
 struct HelperState<S> {
     accumulators: HashMap<DateTime<Utc>, Accumulator<S>>,
     last_timestamp_seen: Nonce,
@@ -92,7 +95,7 @@ impl Helper {
                     },
                 }
             } else {
-                serde_json::from_slice(state_blob)?
+                todo!() //serde_json::from_slice(state_blob)?
             };
 
         let aggregator = Aggregator::new(
@@ -159,15 +162,15 @@ impl Helper {
             )?;
 
             // TODO make this generic over Vdaf
-            let input_share_message: <Prio3Sum64 as Vdaf>::InputShare =
-                serde_json::from_slice(&decrypted_input_share)?;
+            let input_share_message: <Prio3Sum64 as Vdaf>::InputShare = todo!();
+            //                serde_json::from_slice(&decrypted_input_share)?;
 
             let (step, helper_prepare_message) = self
                 .aggregator
                 .prepare_message(sub_request.timestamp, &input_share_message)?;
 
-            let leader_prepare_message: <Prio3Sum64 as vdaf::Aggregator>::PrepareMessage =
-                serde_json::from_slice(&sub_request.verify_message)?;
+            let leader_prepare_message: <Prio3Sum64 as vdaf::Aggregator>::PrepareMessage = todo!();
+            //serde_json::from_slice(&sub_request.verify_message)?;
 
             self.aggregator.aggregate_report(
                 sub_request.timestamp,
@@ -177,7 +180,7 @@ impl Helper {
 
             sub_responses.push(VerifySubResponse {
                 timestamp: sub_request.timestamp,
-                verification_message: serde_json::to_vec(&helper_prepare_message)?,
+                verification_message: todo!(), //serde_json::to_vec(&helper_prepare_message)?,
             });
 
             self.last_timestamp_seen = sub_request.timestamp;
@@ -186,10 +189,11 @@ impl Helper {
         self.aggregator.dump_accumulators();
 
         Ok(VerifyResponse {
-            helper_state: serde_json::to_vec(&HelperState {
-                accumulators: self.aggregator.clone_accumulators(),
-                last_timestamp_seen: self.last_timestamp_seen,
-            })?,
+            helper_state: todo!(),
+            // serde_json::to_vec(&HelperState {
+            //     accumulators: self.aggregator.clone_accumulators(),
+            //     last_timestamp_seen: self.last_timestamp_seen,
+            // })?,
             sub_responses,
         })
     }
@@ -210,78 +214,83 @@ pub async fn run_helper(ppm_parameters: Parameters, hpke_config: hpke::Config) -
         .port()
         .unwrap_or(80);
 
-    let hpke_config_endpoint = hpke_config.warp_endpoint();
+    let hpke_config_endpoint = hpke_config.warp_endpoint()?;
 
-    let aggregate = warp::post()
-        .and(warp::path("aggregate"))
-        .and(warp::body::json())
-        .and(with_shared_value(ppm_parameters.clone()))
-        .and(with_shared_value(hpke_config.clone()))
-        .and_then(
-            |aggregate_request: VerifyStartRequest,
-             ppm_parameters: Parameters,
-             hpke_config: hpke::Config| async move {
-                // We intentionally create a new instance of Helper every time we
-                // handle a request to prove that we can successfully execute the
-                // protocol without maintaining local state
-                let mut helper_aggregator = match Helper::new(
-                    &ppm_parameters,
-                    &hpke_config,
-                    &aggregate_request.helper_state,
-                ) {
-                    Ok(helper) => helper,
-                    Err(e) => {
-                        return Err(warp::reject::custom(
-                            e.problem_document(&ppm_parameters, "aggregate"),
-                        ))
-                    }
-                };
+    // let aggregate = warp::post()
+    //     .and(warp::path("aggregate"))
+    //     //.and(warp::body::json())
+    //     .and(with_shared_value(ppm_parameters.clone()))
+    //     .and(with_shared_value(hpke_config.clone()))
+    //     .and_then(
+    //         |//aggregate_request: VerifyStartRequest,
+    //          ppm_parameters: Parameters,
+    //          hpke_config: hpke::Config| async move {
+    //             let aggregate_request: VerifyStartRequest = todo!();
+    //             // We intentionally create a new instance of Helper every time we
+    //             // handle a request to prove that we can successfully execute the
+    //             // protocol without maintaining local state
+    //             let mut helper_aggregator = Helper::new(
+    //                 &ppm_parameters,
+    //                 &hpke_config,
+    //                 &aggregate_request.helper_state,
+    //             )
+    //             .map_err(|e| {
+    //                 warp::reject::custom(e.problem_document(Some(&ppm_parameters), "aggregate"))
+    //             })?;
 
-                match helper_aggregator.handle_aggregate(&aggregate_request) {
-                    Ok(response) => Ok(reply::with_status(reply::json(&response), StatusCode::OK)),
-                    Err(e) => Err(warp::reject::custom(
-                        e.problem_document(&ppm_parameters, "aggregate"),
-                    )),
-                }
-            },
-        )
-        .with(warp::trace::named("aggregate"));
+    //             let response = helper_aggregator
+    //                 .handle_aggregate(&aggregate_request)
+    //                 .map_err(|e| {
+    //                     warp::reject::custom(e.problem_document(Some(&ppm_parameters), "aggregate"))
+    //                 })?;
+    //             let todo: Json = todo!();
+    //             Ok(reply::with_status(
+    //                 /*reply::json(&response)*/ todo,
+    //                 StatusCode::OK,
+    //             )) as Result<_, Rejection>
+    //         },
+    //     )
+    //     .with(warp::trace::named("aggregate"));
 
-    let output_share = warp::post()
-        .and(warp::path("output_share"))
-        .and(warp::body::json())
-        .and(with_shared_value(ppm_parameters.clone()))
-        .and(with_shared_value(hpke_config.clone()))
-        .and_then(
-            |output_share_request: OutputShareRequest,
-             ppm_parameters: Parameters,
-             hpke_config: hpke::Config| async move {
-                let mut helper_aggregator = match Helper::new(
-                    &ppm_parameters,
-                    &hpke_config,
-                    &output_share_request.helper_state,
-                ) {
-                    Ok(helper) => helper,
-                    Err(e) => {
-                        return Err(warp::reject::custom(
-                            e.problem_document(&ppm_parameters, "output_share"),
-                        ))
-                    }
-                };
+    // let output_share = warp::post()
+    //     .and(warp::path("output_share"))
+    //     //.and(warp::body::json())
+    //     .and(with_shared_value(ppm_parameters.clone()))
+    //     .and(with_shared_value(hpke_config.clone()))
+    //     .and_then(
+    //         |//output_share_request: OutputShareRequest,
+    //          ppm_parameters: Parameters,
+    //          hpke_config: hpke::Config| async move {
+    //             let output_share_request: OutputShareRequest = todo!();
+    //             let mut helper_aggregator = Helper::new(
+    //                 &ppm_parameters,
+    //                 &hpke_config,
+    //                 &output_share_request.helper_state,
+    //             )
+    //             .map_err(|e| {
+    //                 warp::reject::custom(e.problem_document(Some(&ppm_parameters), "output_share"))
+    //             })?;
 
-                match helper_aggregator.handle_output_share(&output_share_request) {
-                    Ok(response) => Ok(reply::with_status(reply::json(&response), StatusCode::OK)),
-                    Err(e) => Err(warp::reject::custom(
-                        e.problem_document(&ppm_parameters, "output_share"),
-                    )),
-                }
-            },
-        )
-        .with(warp::trace::named("output_share"));
+    //             let response = helper_aggregator
+    //                 .handle_output_share(&output_share_request)
+    //                 .map_err(|e| {
+    //                     warp::reject::custom(
+    //                         e.problem_document(Some(&ppm_parameters), "output_share"),
+    //                     )
+    //                 })?;
+
+    //             let todo: Json = todo!();
+    //             Ok(reply::with_status(
+    //                 /*reply::json(&response)*/ todo,
+    //                 StatusCode::OK,
+    //             )) as Result<_, Rejection>
+    //         },
+    //     )
+    //     .with(warp::trace::named("output_share"));
 
     let routes = hpke_config_endpoint
-        .or(aggregate)
-        .or(output_share)
+        // .or(aggregate)
+        // .or(output_share)
         .recover(handle_rejection)
         .with(warp::trace::request());
 
