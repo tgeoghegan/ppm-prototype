@@ -1,6 +1,8 @@
 use crate::{
-    collect::EncryptedOutputShare, config_path, parameters::TaskId, upload::EncryptedInputShare,
-    Interval, Nonce, Role,
+    config_path,
+    error::{IntoHttpApiProblem, ProblemDocumentType},
+    parameters::TaskId,
+    Role,
 };
 use ::hpke::{
     aead::{Aead, AeadCtxR, AeadCtxS, AesGcm128, AesGcm256, ChaCha20Poly1305},
@@ -9,11 +11,18 @@ use ::hpke::{
     setup_receiver, setup_sender, Deserializable, HpkeError, Kem, OpModeR, OpModeS, Serializable,
 };
 use derivative::Derivative;
-use http::StatusCode;
+use num_enum::{IntoPrimitive, TryFromPrimitive};
+use prio::codec::{decode_opaque_u16, encode_opaque_u16, Decode, Encode};
 use rand::thread_rng;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
-use std::{fs::File, io::Read, path::PathBuf};
+use std::{
+    convert::TryFrom,
+    fmt::{self, Display},
+    fs::File,
+    io::{Cursor, Read},
+    path::PathBuf,
+};
 use warp::{filters::BoxedFilter, reply, Filter, Reply};
 
 #[derive(Debug, thiserror::Error)]
@@ -28,25 +37,83 @@ pub enum Error {
     InvalidConfiguration(&'static str),
     #[error("file error: {1}")]
     File(#[source] std::io::Error, PathBuf),
+    #[error("IO error")]
+    Io(#[from] std::io::Error),
+    #[error("VDAF error")]
+    Vdaf(#[from] prio::vdaf::VdafError),
+    #[error("Primitive conversion: {0}")]
+    Primitive(String),
+}
+
+impl IntoHttpApiProblem for Error {
+    fn problem_document_type(&self) -> Option<ProblemDocumentType> {
+        None
+    }
+}
+
+/// Labels incorporated into HPKE application info string
+#[derive(Clone, Copy, Debug)]
+pub enum Label {
+    InputShare,
+    AggregateShare,
+}
+
+impl Label {
+    pub fn as_bytes(&self) -> &'static [u8] {
+        match self {
+            Self::InputShare => "ppm input share",
+            Self::AggregateShare => "ppm aggregate share",
+        }
+        .as_bytes()
+    }
 }
 
 /// Identifier for an HPKE configuration
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ConfigId(pub u8);
 
+impl Display for ConfigId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 /// An HPKE ciphertext
-#[derive(Clone, Derivative, Serialize, Deserialize)]
+#[derive(Clone, Derivative, Eq, PartialEq)]
 #[derivative(Debug)]
 pub struct Ciphertext {
     /// Identifier of the HPKE configuration used to seal the message
-    config_id: ConfigId,
+    pub config_id: ConfigId,
     /// Encasulated HPKE context
-    #[serde(rename = "enc")]
     #[derivative(Debug = "ignore")]
-    encapsulated_context: Vec<u8>,
+    pub encapsulated_context: Vec<u8>,
     /// Ciphertext
     #[derivative(Debug = "ignore")]
-    payload: Vec<u8>,
+    pub payload: Vec<u8>,
+}
+
+impl Decode<()> for Ciphertext {
+    type Error = Error;
+
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Error> {
+        let config_id = ConfigId(u8::decode(&(), bytes)?);
+        let encapsulated_context = decode_opaque_u16(bytes)?;
+        let payload = decode_opaque_u16(bytes)?;
+
+        Ok(Self {
+            config_id,
+            encapsulated_context,
+            payload,
+        })
+    }
+}
+
+impl Encode for Ciphertext {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.config_id.0.encode(bytes);
+        encode_opaque_u16(bytes, &self.encapsulated_context);
+        encode_opaque_u16(bytes, &self.payload);
+    }
 }
 
 /// Configuration file containing multiple HPKE configs
@@ -64,34 +131,74 @@ impl ConfigFile {
     }
 }
 
+/// Public key for use in HPKE, serialized using the `SerializePublicKey`
+/// function as described in draft-irtf-cfrg-hpke-11, §4 and §7.1.1.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PublicKey(pub(crate) Vec<u8>);
+
+impl PublicKey {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl AsRef<[u8]> for PublicKey {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl From<Vec<u8>> for PublicKey {
+    fn from(v: Vec<u8>) -> Self {
+        Self::new(v)
+    }
+}
+
+/// Private Key for use in HPKE, serialized using the `SerializePrivateKey`
+/// function as described in draft-irtf-cfrg-hpke-11, §4 and §7.1.2.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrivateKey(pub(crate) Vec<u8>);
+
+impl PrivateKey {
+    pub(crate) fn new(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+}
+
+impl AsRef<[u8]> for PrivateKey {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_ref()
+    }
+}
+
+impl From<Vec<u8>> for PrivateKey {
+    fn from(v: Vec<u8>) -> Self {
+        Self::new(v)
+    }
+}
+
 /// HPKE configuration for a PPM participant, corresponding to `struct
 /// HpkeConfig` in RFCXXXX.
-// TODO: I wish we could do better than u16 for the kem/kedf/aead IDs, and
-// better than Vec<u8> for the PK.
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Config {
     /// Identifier of the HPKE configuration
     pub id: ConfigId,
     pub(crate) kem_id: KeyEncapsulationMechanism,
     pub(crate) kdf_id: KeyDerivationFunction,
     pub(crate) aead_id: AuthenticatedEncryptionWithAssociatedData,
-    /// The public key, serialized using the `SerializePublicKey` function as
-    /// described in draft-irtf-cfrg-hpke-11, §4 and §7.1.1.
+    /// Public key to which messages should be encrypted
     #[serde(
-        serialize_with = "base64::serialize_bytes",
-        deserialize_with = "base64::deserialize_bytes"
+        serialize_with = "crate::base64::serialize_bytes",
+        deserialize_with = "crate::base64::deserialize_bytes"
     )]
-    pub(crate) public_key: Vec<u8>,
-    /// The private key, serialized using the `SerializePrivateKey` function as
-    /// described in draft-irtf-cfrg-hpke-11, §4 and §7.1.2. This value will not
-    /// be present when advertised by a server from hpke_config.
+    pub(crate) public_key: PublicKey,
+    /// Private key with which messages should be decrypted
     #[serde(
         default,
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "base64::serialize_bytes_option",
-        deserialize_with = "base64::deserialize_bytes_option"
+        serialize_with = "crate::base64::serialize_bytes_option",
+        deserialize_with = "crate::base64::deserialize_bytes_option"
     )]
-    pub(crate) private_key: Option<Vec<u8>>,
+    pub(crate) private_key: Option<PrivateKey>,
 }
 
 impl Config {
@@ -151,29 +258,26 @@ impl Config {
             kem_id: kem,
             kdf_id: kdf,
             aead_id: aead,
-            public_key: serialized_public_key,
-            private_key: Some(serialized_private_key),
+            public_key: PublicKey(serialized_public_key),
+            private_key: Some(PrivateKey(serialized_private_key)),
         }
     }
 
-    pub fn warp_endpoint(&self) -> BoxedFilter<(impl Reply,)> {
-        let config_without_private_key = self.without_private_key();
-        warp::get()
+    #[tracing::instrument(err)]
+    pub fn warp_endpoint(&self) -> Result<BoxedFilter<(impl Reply,)>, Error> {
+        let mut body = vec![];
+        self.encode(&mut body);
+        Ok(warp::get()
             .and(warp::path("hpke_config"))
             .map(move || {
-                reply::with_status(reply::json(&config_without_private_key), StatusCode::OK)
+                reply::with_header(
+                    reply::with_status(body.clone(), http::StatusCode::OK),
+                    http::header::CACHE_CONTROL,
+                    "max-age=86400",
+                )
             })
-            .map(|r| reply::with_header(r, http::header::CACHE_CONTROL, "max-age=86400"))
             .with(warp::trace::named("hpke_config"))
-            .boxed()
-    }
-
-    /// Create a copy of the config without the private key, suitable for
-    /// public advertising of HPKE config
-    fn without_private_key(&self) -> Self {
-        let mut copy = self.clone();
-        copy.private_key = None;
-        copy
+            .boxed())
     }
 
     /// True if this HPKE config's algos are supported by this implementation.
@@ -190,57 +294,51 @@ impl Config {
         }
     }
 
-    /// Construct an application into string suitable for constructing HPKE
-    /// contexts for sealing or opening PPM reports.
-    fn report_application_info(task_id: &TaskId, recipient_role: Role) -> Vec<u8> {
-        // application info is `"pda input share" || task_id || server_role` per
-        // §4.2.2 Upload Request and §4.3.1 Aggregate Request
+    fn application_info(
+        task_id: &TaskId,
+        label: Label,
+        sender_role: Role,
+        recipient_role: Role,
+    ) -> Vec<u8> {
         [
-            "pda input share".as_bytes(),
             task_id.as_bytes(),
+            label.as_bytes(),
+            &[sender_role as u8],
             &[recipient_role as u8],
         ]
         .concat()
     }
 
-    /// Construct an application info string suitable for constructing HPKE
-    /// contexts for sealing or opening PPM output shares
-    fn output_share_application_info(task_id: &TaskId, sender_role: Role) -> Vec<u8> {
-        [
-            "pda output share".as_bytes(),
-            task_id.as_bytes(),
-            &[sender_role as u8],
-        ]
-        .concat()
-    }
-
-    /// Construct an HPKE Sender suitable for encrypting `EncryptedInputShare`
-    /// structures for inclusion in a PPM `Report`.
-    pub fn report_sender(
+    /// Construct an HPKE sender encrypting messages to this config's public key
+    /// and using the remaining parameters to construct an application info
+    /// string.
+    pub fn sender(
         &self,
         task_id: &TaskId,
+        label: Label,
+        sender_role: Role,
         recipient_role: Role,
-    ) -> Result<Sender<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>, Error> {
-        // TODO(timg) deal with algo IDs besides these ones -- but what would
-        // this function even return then?
+    ) -> Result<DefaultSender, Error> {
         self.supported_configuration()?;
 
-        Sender::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
+        DefaultSender::new(
             self.id,
-            &Self::report_application_info(task_id, recipient_role),
-            &self.public_key,
+            &Self::application_info(task_id, label, sender_role, recipient_role),
+            &self.public_key.0,
         )
     }
 
-    /// Construct an HPKE Recipient suitable for decrypting
-    /// `EncryptedInputShare` structures from a PPM `Report`.
-    pub fn report_recipient(
+    /// Construct an HPKE recipient decrypting messages using this config's
+    /// private key using the remaining parameters to construct an application
+    /// info string.
+    pub fn recipient(
         &self,
         task_id: &TaskId,
+        label: Label,
+        sender_role: Role,
         recipient_role: Role,
         encapsulated_context: &[u8],
-    ) -> Result<Recipient<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>, Error> {
-        // TODO(timg): as in sender(), figure out how to handle other specializations
+    ) -> Result<DefaultRecipient, Error> {
         self.supported_configuration()?;
 
         let private_key = self
@@ -248,87 +346,67 @@ impl Config {
             .as_ref()
             .ok_or(Error::InvalidConfiguration("no private key"))?;
 
-        Recipient::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
-            &Self::report_application_info(task_id, recipient_role),
-            private_key,
-            encapsulated_context,
-        )
-    }
-
-    /// Construct an HPKE sender suitable for use by leader or helper to encrypt
-    /// `EncryptedOutputShare` structures to collector
-    pub(crate) fn output_share_sender(
-        &self,
-        task_id: &TaskId,
-        sender_role: Role,
-    ) -> Result<Sender<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>, Error> {
-        self.supported_configuration()?;
-
-        Sender::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
-            self.id,
-            &Self::output_share_application_info(task_id, sender_role),
-            &self.public_key,
-        )
-    }
-
-    /// Construct an HPKE recipient suitable for use by collector to decrypt
-    /// `EncryptedOutputShare` structures sent by leader or helper
-    pub fn output_share_recipient(
-        &self,
-        task_id: &TaskId,
-        sender_role: Role,
-        encapsulated_context: &[u8],
-    ) -> Result<Recipient<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>, Error> {
-        self.supported_configuration()?;
-
-        let private_key = self
-            .private_key
-            .as_ref()
-            .ok_or(Error::InvalidConfiguration("no private key"))?;
-
-        Recipient::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
-            &Self::output_share_application_info(task_id, sender_role),
-            private_key,
+        DefaultRecipient::new(
+            &Self::application_info(task_id, label, sender_role, recipient_role),
+            &private_key.0,
             encapsulated_context,
         )
     }
 }
 
-mod base64 {
-    //! Custom serialization module used to serialize TaskId to base64
-    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+impl Decode<()> for Config {
+    type Error = Error;
 
-    pub fn serialize_bytes<S: Serializer>(v: &[u8], s: S) -> Result<S::Ok, S::Error> {
-        String::serialize(&base64::encode(v), s)
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Error> {
+        let id = ConfigId(u8::decode(&(), bytes)?);
+        // It's a bit unpleasant reducing the error from try_from() to a string
+        // but since TryFromPrimitiveError is generic over the enum, it would
+        // contaminate this module's error enum with a generic parameter, which
+        // is a big hassle.
+        let kem_id = KeyEncapsulationMechanism::try_from(u16::decode(&(), bytes)?)
+            .map_err(|e| Error::Primitive(e.to_string()))?;
+        let kdf_id = KeyDerivationFunction::try_from(u16::decode(&(), bytes)?)
+            .map_err(|e| Error::Primitive(e.to_string()))?;
+        let aead_id = AuthenticatedEncryptionWithAssociatedData::try_from(u16::decode(&(), bytes)?)
+            .map_err(|e| Error::Primitive(e.to_string()))?;
+        let public_key = PublicKey(decode_opaque_u16(bytes)?);
+
+        Ok(Self {
+            id,
+            kem_id,
+            kdf_id,
+            aead_id,
+            public_key,
+            // Private key is never present when HPKE config is transmitted in TLS syntax
+            private_key: None,
+        })
     }
+}
 
-    pub fn deserialize_bytes<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-        base64::decode(String::deserialize(d)?.as_bytes()).map_err(Error::custom)
-    }
-
-    pub fn serialize_bytes_option<S: Serializer>(
-        v: &Option<Vec<u8>>,
-        s: S,
-    ) -> Result<S::Ok, S::Error> {
-        match v {
-            Some(v) => String::serialize(&base64::encode(v), s),
-            None => <Option<Vec<u8>>>::serialize(&None, s),
-        }
-    }
-
-    pub fn deserialize_bytes_option<'de, D: Deserializer<'de>>(
-        d: D,
-    ) -> Result<Option<Vec<u8>>, D::Error> {
-        Ok(Some(
-            base64::decode(String::deserialize(d)?.as_bytes()).map_err(Error::custom)?,
-        ))
+impl Encode for Config {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.id.0.encode(bytes);
+        u16::from(self.kem_id).encode(bytes);
+        u16::from(self.kdf_id).encode(bytes);
+        u16::from(self.aead_id).encode(bytes);
+        encode_opaque_u16(bytes, &self.public_key.0);
     }
 }
 
 /// HPKE key encapsulation mechanism identifiers. For (de)serialization.
 // TODO(timg) HPKE defines three more KEMs, but crate hpke only supports the
 // following two
-#[derive(Clone, Debug, Serialize_repr, Deserialize_repr, Eq, PartialEq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize_repr,
+    Deserialize_repr,
+    Eq,
+    PartialEq,
+    IntoPrimitive,
+    TryFromPrimitive,
+)]
 #[repr(u16)]
 pub enum KeyEncapsulationMechanism {
     /// NIST P-256 keys and HKDF SHA-256
@@ -338,7 +416,17 @@ pub enum KeyEncapsulationMechanism {
 }
 
 /// HPKE key derivation functions. For (de)serialization.
-#[derive(Clone, Debug, Serialize_repr, Deserialize_repr, Eq, PartialEq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize_repr,
+    Deserialize_repr,
+    Eq,
+    PartialEq,
+    IntoPrimitive,
+    TryFromPrimitive,
+)]
 #[repr(u16)]
 pub enum KeyDerivationFunction {
     /// HMAC Key Derivation Function SHA-256
@@ -351,7 +439,17 @@ pub enum KeyDerivationFunction {
 
 /// HPKE authenticated encryption with associated data functions. For
 /// (de)serialization.
-#[derive(Clone, Debug, Serialize_repr, Deserialize_repr, Eq, PartialEq)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Serialize_repr,
+    Deserialize_repr,
+    Eq,
+    PartialEq,
+    IntoPrimitive,
+    TryFromPrimitive,
+)]
 #[repr(u16)]
 pub enum AuthenticatedEncryptionWithAssociatedData {
     /// AES-128 in GCM mode
@@ -403,49 +501,22 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Sender<Encrypt, Derive, Encap
         })
     }
 
-    /// Encrypt the plaintext, incorporating AAD derived from `report`, and
-    /// return the ciphertext, which consists of (ciphertext || tag), and is
-    /// suitable as the value of `EncryptedInputShare.payload`. Also returns the
-    /// encapped public key for sending to recipient.
+    /// Encrypt `plaintext` and return the HPKE ciphertext.
     ///
     /// In PPM, an HPKE context can only be used once (we have no means of
     /// ensuring that sender and recipient "increment" nonces in lockstep), so
     /// this method consumes self.
-    pub fn encrypt_input_share(
-        mut self,
-        timestamp: Nonce,
-        plaintext: &[u8],
-    ) -> Result<(Vec<u8>, Encapsulate::EncappedKey), Error> {
-        Ok((
-            self.seal2(plaintext, &timestamp.associated_data())?,
-            self.encapped_key,
-        ))
-    }
-
-    pub fn encrypt_output_share(
-        mut self,
-        batch_interval: Interval,
-        plaintext: &[u8],
-    ) -> Result<(Vec<u8>, Encapsulate::EncappedKey), Error> {
-        Ok((
-            self.seal2(plaintext, &batch_interval.associated_data())?,
-            self.encapped_key,
-        ))
-    }
-
-    pub fn seal(&mut self, plaintext: &[u8], associated_data: &[u8]) -> Result<Ciphertext, Error> {
+    pub fn seal(mut self, plaintext: &[u8], associated_data: &[u8]) -> Result<Ciphertext, Error> {
         Ok(Ciphertext {
             config_id: self.config_id,
             encapsulated_context: self.encapped_key.to_bytes().to_vec(),
             payload: self.context.seal(plaintext, associated_data)?,
         })
     }
-
-    // TODO: Delete this once struct Report, etc. are updated
-    fn seal2(&mut self, plaintext: &[u8], associated_data: &[u8]) -> Result<Vec<u8>, Error> {
-        Ok(self.context.seal(plaintext, associated_data)?)
-    }
 }
+
+pub type DefaultRecipient =
+    Recipient<hpke::aead::ChaCha20Poly1305, hpke::kdf::HkdfSha256, hpke::kem::X25519HkdfSha256>;
 
 /// An HPKE recipient that decrypts messages encrypted to its public key by some
 /// sender public key, using a chosen set of AEAD, key derivation and key
@@ -480,42 +551,17 @@ impl<Encrypt: Aead, Derive: Kdf, Encapsulate: Kem> Recipient<Encrypt, Derive, En
         Ok(Self { context })
     }
 
-    /// Decrypt the input share from `report` for this `Recipient`'s server role
-    /// and return the plaintext.
+    /// Decrypt `ciphertext` and return the plaintext.
     ///
     /// In PPM, an HPKE context can only be used once (we have no means of
     /// ensuring that sender and recipient "increment" nonces in lockstep), so
     /// this method consumes self.
-    pub fn decrypt_input_share(
-        mut self,
-        encrypted_input_share: &EncryptedInputShare,
-        associated_data: &[u8],
-    ) -> Result<Vec<u8>, Error> {
-        self.open2(&encrypted_input_share.payload, associated_data)
-    }
-
-    pub fn decrypt_output_share(
-        mut self,
-        encrypted_output_share: &EncryptedOutputShare,
-        batch_interval: Interval,
-    ) -> Result<Vec<u8>, Error> {
-        self.open2(
-            &encrypted_output_share.payload,
-            &batch_interval.associated_data(),
-        )
-    }
-
     pub fn open(
-        &mut self,
+        mut self,
         ciphertext: &Ciphertext,
         associated_data: &[u8],
     ) -> Result<Vec<u8>, Error> {
         Ok(self.context.open(&ciphertext.payload, associated_data)?)
-    }
-
-    //TODO: delete this once I clean up Report, etc.
-    fn open2(&mut self, ciphertext: &[u8], associated_data: &[u8]) -> Result<Vec<u8>, Error> {
-        Ok(self.context.open(ciphertext, associated_data)?)
     }
 }
 
@@ -546,7 +592,7 @@ mod tests {
         // `Config`). The only way I can think of to do this right now is a big
         // match over fields of config so we can dispatch to the appropriate
         // specialization of Sender, but that is _a lot_ of match arms to write!
-        let mut sender = match (&config.kem_id, &config.kdf_id, &config.aead_id) {
+        let sender = match (&config.kem_id, &config.kdf_id, &config.aead_id) {
             (
                 KeyEncapsulationMechanism::X25519HkdfSha256,
                 KeyDerivationFunction::HkdfSha256,
@@ -554,24 +600,26 @@ mod tests {
             ) => Sender::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
                 config.id,
                 application_info,
-                &config.public_key,
+                &config.public_key.0,
             )
             .unwrap(),
             // TODO(timg): wire up more tuples of algos
             (_, _, _) => unimplemented!("unsupported set of algos"),
         };
 
+        let encapped_key = sender.encapped_key.to_bytes();
+
         let ciphertext = sender.seal(message, message_associated_data).unwrap();
 
-        let mut recipient = match (&config.kem_id, &config.kdf_id, &config.aead_id) {
+        let recipient = match (&config.kem_id, &config.kdf_id, &config.aead_id) {
             (
                 KeyEncapsulationMechanism::X25519HkdfSha256,
                 KeyDerivationFunction::HkdfSha256,
                 AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305,
             ) => Recipient::<ChaCha20Poly1305, HkdfSha256, X25519HkdfSha256>::new(
                 application_info,
-                &config.private_key.unwrap(),
-                &sender.encapped_key.to_bytes(),
+                &config.private_key.unwrap().0,
+                &encapped_key,
             )
             .unwrap(),
             (_, _, _) => unimplemented!("unsupported set of algos"),

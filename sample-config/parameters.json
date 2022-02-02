@@ -1,5 +1,5 @@
 {
-    "task_id": "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f",
+    "task_id": "AAECAwQFBgcICQoLDA0ODwABAgMEBQYHCAkKCwwNDg8=",
     "aggregator_endpoints": [
         "http://localhost:8080",
         "http://localhost:8081"
@@ -19,6 +19,6 @@
             "bits": 64
         }
     },
-    "aggregator_auth_key": "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f",
+    "aggregator_auth_key": "AAECAwQFBgcICQoLDA0ODwABAgMEBQYHCAkKCwwNDg8=",
     "vdaf_verification_parameter": ""
 }

@@ -1,26 +1,31 @@
 //! Helper implementation
 
 use crate::{
-    aggregate::{Accumulator, Aggregator, VerifyResponse, VerifyStartRequest, VerifySubResponse},
-    collect::{EncryptedOutputShare, OutputShareRequest},
+    aggregate::{
+        Aggregate, AggregateInitReq, AggregateMessage, AggregateReq, AggregateResp, Aggregator,
+        Transition, TransitionError, TransitionMessage,
+    },
     error::{handle_rejection, IntoHttpApiProblem, ProblemDocumentType},
     hpke,
     parameters::{Parameters, TaskId},
-    with_shared_value, Nonce, Role, Time,
+    with_shared_value, Nonce, Role,
 };
-use chrono::{DateTime, Utc};
+use bytes::Bytes;
 use color_eyre::eyre::Result;
-use http::StatusCode;
-use prio::vdaf::{self, prio3::Prio3Sum64, suite::Suite, Vdaf, VdafError};
-use serde::{Deserialize, Serialize};
+use http::{Response, StatusCode};
+use prio::{
+    codec::{Decode, Encode},
+    vdaf::{self, PrepareStep, VdafError},
+};
 use std::{
-    cmp::Ordering,
     collections::HashMap,
     fmt::Debug,
     net::{IpAddr, Ipv4Addr, SocketAddr},
+    sync::Arc,
 };
+use tokio::sync::Mutex;
 use tracing::{error, info, warn};
-use warp::{reply, Filter};
+use warp::{Filter, Rejection};
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -31,15 +36,17 @@ pub enum Error {
     #[error("unknown task ID")]
     UnrecognizedTask(TaskId),
     #[error("unknown HPKE config ID {0}")]
-    UnknownHpkeConfig(u8),
+    UnknownHpkeConfig(hpke::ConfigId),
     #[error("VDAF error {0}")]
     Vdaf(#[from] VdafError),
     #[error("HTTP client error {0}")]
     HttpClient(#[from] reqwest::Error),
     #[error("Aggregate HTTP request error")]
     AggregateRequest(StatusCode),
-    #[error("Aggregation error")]
+    #[error("Aggregation error {0}")]
     Aggregation(#[from] crate::aggregate::Error),
+    #[error("aggregate protocol error {0}")]
+    AggregateProtocol(String),
 }
 
 impl IntoHttpApiProblem for Error {
@@ -58,230 +65,357 @@ impl IntoHttpApiProblem for Error {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct HelperState<S> {
-    accumulators: HashMap<DateTime<Utc>, Accumulator<S>>,
-    last_timestamp_seen: Nonce,
+/// In-memory representation of a report stored by the leader
+#[derive(Clone, Debug)]
+pub enum StoredReport<A: vdaf::Aggregator> {
+    Waiting { step: A::PrepareStep },
+    Accumulated,
 }
 
 /// Implements endpoints for helper.
 #[derive(Debug)]
-pub struct Helper {
+pub struct Helper<A: vdaf::Aggregator + Debug> {
     parameters: Parameters,
-    hpke_config: hpke::Config,
-    aggregator: Aggregator<Prio3Sum64>,
-    last_timestamp_seen: Nonce,
+    aggregator: Aggregator<A>,
+    stored_reports: HashMap<Nonce, StoredReport<A>>,
 }
 
-impl Helper {
-    #[tracing::instrument(err, skip(hpke_config, state_blob))]
+impl<A: vdaf::Aggregator + Debug> Helper<A> {
+    #[tracing::instrument(err, skip(hpke_config))]
     pub fn new(
         parameters: &Parameters,
+        vdaf_aggregator: &A,
+        verify_parameter: &A::VerifyParam,
+        aggregation_parameter: &A::AggregationParam,
         hpke_config: &hpke::Config,
-        state_blob: &[u8],
     ) -> Result<Self, Error> {
-        // TODO(timg): no more helper state blob
-        let helper_state: HelperState<<Prio3Sum64 as Vdaf>::AggregateShare> =
-            if state_blob.is_empty() {
-                // Start with empty state
-                HelperState {
-                    accumulators: HashMap::new(),
-                    last_timestamp_seen: Nonce {
-                        time: Time(0),
-                        rand: 0,
-                    },
-                }
-            } else {
-                serde_json::from_slice(state_blob)?
-            };
-
         let aggregator = Aggregator::new(
             Role::Helper,
-            Prio3Sum64::new(Suite::Blake3, 2, 63)?,
+            hpke_config,
+            vdaf_aggregator,
+            verify_parameter,
+            aggregation_parameter,
             // TODO: lame that both structs own a copy of parameters
-            parameters.clone(),
-            // TODO: wire up aggregation parameter for poplar
-            (),
-            helper_state.accumulators,
+            parameters,
         );
 
         Ok(Self {
             parameters: parameters.clone(),
-            hpke_config: hpke_config.clone(),
             aggregator,
-            last_timestamp_seen: helper_state.last_timestamp_seen,
+            stored_reports: HashMap::new(),
         })
     }
 
-    #[tracing::instrument(skip(request, self), err)]
+    #[tracing::instrument(skip(self, aggregate_message), err)]
     pub fn handle_aggregate(
         &mut self,
-        request: &VerifyStartRequest,
-    ) -> Result<VerifyResponse, Error> {
+        aggregate_message: &AggregateMessage,
+    ) -> Result<AggregateMessage, Error> {
+        // TODO: verify HMAC
+
+        let inner_response = match aggregate_message.aggregate {
+            Aggregate::Initialize(ref req) => Aggregate::Response(self.handle_aggregate_init(req)?),
+            Aggregate::Request(ref req) => Aggregate::Response(self.handle_aggregate_req(req)?),
+            ref message => {
+                return Err(Error::AggregateProtocol(format!(
+                    "unexpected aggregate message {:?}",
+                    message
+                )))
+            }
+        };
+
+        Ok(AggregateMessage {
+            aggregate: inner_response,
+            tag: [0u8; 32],
+        })
+    }
+
+    #[tracing::instrument(skip(self, request), err)]
+    fn handle_aggregate_init(
+        &mut self,
+        request: &AggregateInitReq,
+    ) -> Result<AggregateResp, Error> {
         info!(
-            sub_request_count = request.sub_requests.len(),
+            sub_request_count = request.report_shares.len(),
             "got aggregate request"
         );
 
-        if request.task_id != self.parameters.task_id {
-            return Err(Error::UnrecognizedTask(request.task_id));
-        }
+        let mut transitions = vec![];
 
-        let mut sub_responses = vec![];
-
-        for sub_request in &request.sub_requests {
-            if sub_request.timestamp.cmp(&self.last_timestamp_seen) != Ordering::Greater {
-                warn!(
-                    request_timestamp = ?sub_request.timestamp,
-                    last_timestamp_seen = ?self.last_timestamp_seen,
-                    "ignoring report whose timestamp is too old"
-                );
-                continue;
+        for report_share in &request.report_shares {
+            if self.stored_reports.contains_key(&report_share.nonce) {
+                warn!(report_nonce = ?report_share.nonce, "duplicate report nonce");
+                transitions.push(TransitionMessage {
+                    nonce: report_share.nonce,
+                    transition: Transition::Failed {
+                        error: TransitionError::ReportReplayed,
+                    },
+                });
             }
 
-            if sub_request.helper_share.aggregator_config_id != self.hpke_config.id.0 {
-                return Err(Error::UnknownHpkeConfig(
-                    sub_request.helper_share.aggregator_config_id,
-                ));
-            }
+            let (step, prepare_message) = match self.aggregator.prepare_message(
+                request.task_id,
+                report_share.nonce,
+                &report_share.extensions,
+                &report_share.encrypted_input_share,
+            ) {
+                Ok(v) => v,
+                Err(prep_error) => {
+                    warn!(?prep_error, "prepare start of report failed");
+                    transitions.push(TransitionMessage {
+                        nonce: report_share.nonce,
+                        transition: Transition::Failed {
+                            error: prep_error.into(),
+                        },
+                    });
+                    continue;
+                }
+            };
 
-            // Decrypt and decode helper UploadMessage. We must create a new context
-            // for each message or the nonces won't line up with the sender.
-            let hpke_recipient = self.hpke_config.report_recipient(
-                &request.task_id,
-                Role::Helper,
-                &sub_request.helper_share.encapsulated_context,
-            )?;
-
-            let decrypted_input_share = hpke_recipient.decrypt_input_share(
-                &sub_request.helper_share,
-                &sub_request.timestamp.associated_data(),
-            )?;
-
-            // TODO make this generic over Vdaf
-            let input_share_message: <Prio3Sum64 as Vdaf>::InputShare =
-                serde_json::from_slice(&decrypted_input_share)?;
-
-            let (step, helper_prepare_message) = self
-                .aggregator
-                .prepare_message(sub_request.timestamp, &input_share_message)?;
-
-            let leader_prepare_message: <Prio3Sum64 as vdaf::Aggregator>::PrepareMessage =
-                serde_json::from_slice(&sub_request.verify_message)?;
-
-            self.aggregator.aggregate_report(
-                sub_request.timestamp,
-                step,
-                [helper_prepare_message.clone(), leader_prepare_message],
-            )?;
-
-            sub_responses.push(VerifySubResponse {
-                timestamp: sub_request.timestamp,
-                verification_message: serde_json::to_vec(&helper_prepare_message)?,
+            transitions.push(TransitionMessage {
+                nonce: report_share.nonce,
+                transition: Transition::Continued {
+                    payload: prepare_message.get_encoded(),
+                },
             });
 
-            self.last_timestamp_seen = sub_request.timestamp;
+            self.stored_reports
+                .insert(report_share.nonce, StoredReport::Waiting { step });
         }
 
         self.aggregator.dump_accumulators();
 
-        Ok(VerifyResponse {
-            helper_state: serde_json::to_vec(&HelperState {
-                accumulators: self.aggregator.clone_accumulators(),
-                last_timestamp_seen: self.last_timestamp_seen,
-            })?,
-            sub_responses,
+        Ok(AggregateResp {
+            helper_state: vec![],
+            transitions,
         })
     }
 
-    #[tracing::instrument(skip(self, output_share_request), err)]
-    pub fn handle_output_share(
+    #[tracing::instrument(skip(self, request), err)]
+    fn handle_aggregate_req(&mut self, request: &AggregateReq) -> Result<AggregateResp, Error> {
+        if request.task_id != self.parameters.task_id {
+            return Err(Error::UnrecognizedTask(request.task_id));
+        }
+
+        // We ignore helper state. I think realistically, we would use it to store a key that would
+        // identify one of many HashMap<Nonce, StoredReport>s so that we could service multiple
+        // aggregate protocols concurrently. Right now we take a lock on a single Helper that
+        // stores ALL reports.
+
+        let mut transitions = vec![];
+
+        for leader_transition in &request.transitions {
+            let stored_report = match self.stored_reports.get_mut(&leader_transition.nonce) {
+                Some(v) => v,
+                None => {
+                    warn!(leader_transition_nonce = ?leader_transition.nonce, "unrecognized nonce in leader transition");
+                    transitions.push(TransitionMessage {
+                        nonce: leader_transition.nonce,
+                        transition: Transition::Failed {
+                            error: TransitionError::UnrecognizedNonce,
+                        },
+                    });
+                    continue;
+                }
+            };
+
+            match &leader_transition.transition {
+                Transition::Continued { payload } => {
+                    info!(?leader_transition.nonce, "leader continued");
+                    let step = if let StoredReport::Waiting { step } = stored_report {
+                        step
+                    } else {
+                        return Err(Error::AggregateProtocol(
+                            "leader unexpectedly continued".to_string(),
+                        ));
+                    };
+
+                    let preprocessed_prepare_message =
+                        A::PrepareMessage::get_decoded(step, payload)?;
+
+                    // Advance self to round n + 1
+                    let transition = if step.is_last_round() {
+                        info!(?leader_transition.nonce, "verifying proof");
+                        match self.aggregator.prepare_finish(
+                            leader_transition.nonce,
+                            step.clone(),
+                            preprocessed_prepare_message,
+                        )? {
+                            Some(output_share) => {
+                                info!("proof ok");
+                                *stored_report = StoredReport::Accumulated;
+                                info!(?leader_transition.nonce, "accumulating report");
+                                self.aggregator
+                                    .accumulate_report(leader_transition.nonce, output_share)?;
+                                Transition::Finished
+                            }
+                            None => {
+                                info!("proof invalid");
+                                // Proof was invalid
+                                Transition::Failed {
+                                    error: TransitionError::VdafPrepError,
+                                }
+                            }
+                        }
+                    } else {
+                        let (next_round_step, next_round_prepare_message) = self
+                            .aggregator
+                            .aggregator
+                            .prepare_next(step.clone(), preprocessed_prepare_message)?;
+                        *stored_report = StoredReport::Waiting {
+                            step: next_round_step,
+                        };
+                        Transition::Continued {
+                            payload: next_round_prepare_message.get_encoded(),
+                        }
+                    };
+
+                    transitions.push(TransitionMessage {
+                        nonce: leader_transition.nonce,
+                        transition,
+                    });
+                }
+                Transition::Finished => {
+                    // Leader never sends helper finished
+                    warn!(?leader_transition.nonce, "leader unexpectedly finished");
+                    return Err(Error::AggregateProtocol(
+                        "leader unexpectedly finished".to_string(),
+                    ));
+                }
+                Transition::Failed { error } => {
+                    // Leader should never send helper failed
+                    warn!(leader_error = ?error, ?leader_transition.nonce, "leader unexpected failed");
+                    return Err(Error::AggregateProtocol(
+                        "leader unexpectedly failed".to_string(),
+                    ));
+                }
+            }
+        }
+
+        info!("dumping accumulators");
+        self.aggregator.dump_accumulators();
+
+        Ok(AggregateResp {
+            helper_state: vec![],
+            transitions,
+        })
+    }
+
+    #[tracing::instrument(skip(self), err)]
+    pub fn handle_aggregate_share(
         &mut self,
-        output_share_request: &OutputShareRequest,
-    ) -> Result<EncryptedOutputShare, Error> {
-        Ok(self
-            .aggregator
-            .extract_output_share(output_share_request.batch_interval)?)
+        aggregate_message: &AggregateMessage,
+    ) -> Result<AggregateMessage, Error> {
+        // TODO: verify HMAC
+
+        let request = match aggregate_message.aggregate {
+            Aggregate::ShareRequest(ref req) => req,
+            ref message => {
+                return Err(Error::AggregateProtocol(format!(
+                    "unexpected aggregate share message {message:?}"
+                )))
+            }
+        };
+
+        Ok(AggregateMessage {
+            aggregate: Aggregate::ShareResponse(
+                self.aggregator
+                    .extract_aggregate_share(request.task_id, request.batch_interval)?,
+            ),
+            tag: [0u8; 32],
+        })
     }
 }
 
-pub async fn run_helper(ppm_parameters: Parameters, hpke_config: hpke::Config) -> Result<()> {
+pub async fn run_helper<A>(
+    ppm_parameters: &Parameters,
+    vdaf_aggregator: &A,
+    verify_parameter: &A::VerifyParam,
+    aggregation_parameter: &A::AggregationParam,
+    hpke_config: &hpke::Config,
+) -> Result<()>
+where
+    A: vdaf::Aggregator + 'static + Send + Sync,
+    A::VerifyParam: Send + Sync,
+    A::AggregationParam: Send + Sync,
+    A::PrepareStep: Send + Sync,
+    A::AggregateShare: Send + Sync,
+{
     let port = ppm_parameters.aggregator_endpoints[Role::Helper.index()]
         .port()
         .unwrap_or(80);
 
-    let hpke_config_endpoint = hpke_config.warp_endpoint();
+    let hpke_config_endpoint = hpke_config.warp_endpoint()?;
+
+    let helper_aggregator = Arc::new(Mutex::new(Helper::new(
+        ppm_parameters,
+        vdaf_aggregator,
+        verify_parameter,
+        aggregation_parameter,
+        hpke_config,
+    )?));
 
     let aggregate = warp::post()
         .and(warp::path("aggregate"))
-        .and(warp::body::json())
-        .and(with_shared_value(ppm_parameters.clone()))
-        .and(with_shared_value(hpke_config.clone()))
-        .and_then(
-            |aggregate_request: VerifyStartRequest,
-             ppm_parameters: Parameters,
-             hpke_config: hpke::Config| async move {
-                // We intentionally create a new instance of Helper every time we
-                // handle a request to prove that we can successfully execute the
-                // protocol without maintaining local state
-                let mut helper_aggregator = match Helper::new(
-                    &ppm_parameters,
-                    &hpke_config,
-                    &aggregate_request.helper_state,
-                ) {
-                    Ok(helper) => helper,
-                    Err(e) => {
-                        return Err(warp::reject::custom(
-                            e.problem_document(&ppm_parameters, "aggregate"),
-                        ))
-                    }
-                };
+        .and(warp::body::bytes())
+        .and(with_shared_value(helper_aggregator.clone()))
+        .and_then(|body: Bytes, helper: Arc<Mutex<Helper<_>>>| async move {
+            let mut helper = helper.lock().await;
+            let aggregate_message = AggregateMessage::get_decoded(&(), &body).map_err(|e| {
+                warp::reject::custom(e.problem_document(Some(&helper.parameters), "aggregate"))
+            })?;
 
-                match helper_aggregator.handle_aggregate(&aggregate_request) {
-                    Ok(response) => Ok(reply::with_status(reply::json(&response), StatusCode::OK)),
-                    Err(e) => Err(warp::reject::custom(
-                        e.problem_document(&ppm_parameters, "aggregate"),
-                    )),
-                }
-            },
-        )
+            let response = helper.handle_aggregate(&aggregate_message).map_err(|e| {
+                warp::reject::custom(e.problem_document(Some(&helper.parameters), "aggregate"))
+            })?;
+
+            let response = Response::builder()
+                .status(StatusCode::OK)
+                .body(response.get_encoded())
+                .map_err(|e| {
+                    warp::reject::custom(e.problem_document(Some(&helper.parameters), "aggregate"))
+                })?;
+
+            Ok(response) as Result<_, Rejection>
+        })
         .with(warp::trace::named("aggregate"));
 
-    let output_share = warp::post()
-        .and(warp::path("output_share"))
-        .and(warp::body::json())
-        .and(with_shared_value(ppm_parameters.clone()))
-        .and(with_shared_value(hpke_config.clone()))
-        .and_then(
-            |output_share_request: OutputShareRequest,
-             ppm_parameters: Parameters,
-             hpke_config: hpke::Config| async move {
-                let mut helper_aggregator = match Helper::new(
-                    &ppm_parameters,
-                    &hpke_config,
-                    &output_share_request.helper_state,
-                ) {
-                    Ok(helper) => helper,
-                    Err(e) => {
-                        return Err(warp::reject::custom(
-                            e.problem_document(&ppm_parameters, "output_share"),
-                        ))
-                    }
-                };
+    let aggregate_share = warp::post()
+        .and(warp::path("aggregate_share"))
+        .and(warp::body::bytes())
+        .and(with_shared_value(helper_aggregator.clone()))
+        .and_then(|body: Bytes, helper: Arc<Mutex<Helper<_>>>| async move {
+            let mut helper = helper.lock().await;
+            let aggregate_message = AggregateMessage::get_decoded(&(), &body).map_err(|e| {
+                warp::reject::custom(
+                    e.problem_document(Some(&helper.parameters), "aggregate_share"),
+                )
+            })?;
 
-                match helper_aggregator.handle_output_share(&output_share_request) {
-                    Ok(response) => Ok(reply::with_status(reply::json(&response), StatusCode::OK)),
-                    Err(e) => Err(warp::reject::custom(
-                        e.problem_document(&ppm_parameters, "output_share"),
-                    )),
-                }
-            },
-        )
-        .with(warp::trace::named("output_share"));
+            let response = helper
+                .handle_aggregate_share(&aggregate_message)
+                .map_err(|e| {
+                    warp::reject::custom(
+                        e.problem_document(Some(&helper.parameters), "aggregate_share"),
+                    )
+                })?;
+
+            let response = Response::builder()
+                .status(StatusCode::OK)
+                .body(response.get_encoded())
+                .map_err(|e| {
+                    warp::reject::custom(
+                        e.problem_document(Some(&helper.parameters), "aggregate_share"),
+                    )
+                })?;
+
+            Ok(response) as Result<_, Rejection>
+        })
+        .with(warp::trace::named("aggregate_share"));
 
     let routes = hpke_config_endpoint
         .or(aggregate)
-        .or(output_share)
+        .or(aggregate_share)
         .recover(handle_rejection)
         .with(warp::trace::request());
 

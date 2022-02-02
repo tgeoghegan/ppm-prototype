@@ -1,20 +1,21 @@
-//! The collect portion of the PPM protocol, per §4.4 of RFCXXXX
+//! The collect portion of the PPM protocol
 
 use crate::{
+    error::{IntoHttpApiProblem, ProblemDocumentType},
     hpke,
     parameters::{Parameters, TaskId},
     Interval, Role,
 };
-use derivative::Derivative;
 use http::{header::CONTENT_TYPE, StatusCode};
 use http_api_problem::HttpApiProblem;
-use prio::vdaf::{
-    prio3::{Prio3Result, Prio3Sum64},
-    suite::Suite,
-    Collector, Vdaf,
+use prio::{
+    codec::{
+        decode_items_u16, decode_opaque_u16, encode_items_u16, encode_opaque_u16, Decode, Encode,
+    },
+    vdaf::{Collector, Vdaf},
 };
 use reqwest::{Client, Response};
-use serde::{Deserialize, Serialize};
+use std::io::Cursor;
 use tracing::info;
 
 static COLLECTOR_USER_AGENT: &str = concat!(
@@ -46,80 +47,107 @@ pub enum Error {
     Vdaf(#[from] prio::vdaf::VdafError),
     #[error("{0}")]
     Unspecified(&'static str),
+    #[error("I/O error")]
+    Io(#[from] std::io::Error),
+}
+
+impl IntoHttpApiProblem for Error {
+    fn problem_document_type(&self) -> Option<ProblemDocumentType> {
+        Some(ProblemDocumentType::UnrecognizedMessage)
+    }
 }
 
 /// A collect request sent to a leader from a collector.
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct CollectRequest {
+///
+/// struct {
+///   TaskID task_id;
+///   Interval batch_interval;
+///   opaque agg_param<0..2^16-1>;
+/// } CollectReq;
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollectRequest<V: Vdaf> {
     pub task_id: TaskId,
     pub batch_interval: Interval,
-    #[serde(skip_serializing_if = "Option::is_none", rename = "aggregation_param")]
-    pub aggregation_parameter: Option<Vec<u8>>,
+    pub aggregation_parameter: V::AggregationParam,
 }
 
-/// The protocol specific portions of CollectRequest
-#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
-pub enum ProtocolCollectFields {
-    /// Prio-specific parameters
-    Prio {},
-    Hits {},
+impl<V: Vdaf> Encode for CollectRequest<V> {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.task_id.encode(bytes);
+        self.batch_interval.encode(bytes);
+        // CollectReq.agg_param is encoded as a variable length opaque byte
+        // string
+        let aggregation_parameter_bytes = self.aggregation_parameter.get_encoded();
+        encode_opaque_u16(bytes, &aggregation_parameter_bytes);
+    }
+}
+
+impl<V: Vdaf> Decode<()> for CollectRequest<V> {
+    type Error = Error;
+
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+        let task_id = TaskId::decode(&(), bytes)?;
+        let batch_interval = Interval::decode(&(), bytes)?;
+        // CollectReq.agg_param is encoded as a variable length opaque byte
+        // string. Decode the byte string into Vec<u8>, then decode that into
+        // V::AggregationParam.
+        let aggregation_parameter_bytes = decode_opaque_u16(bytes)?;
+        let aggregation_parameter =
+            V::AggregationParam::get_decoded(&(), &aggregation_parameter_bytes)?;
+
+        Ok(Self {
+            task_id,
+            batch_interval,
+            aggregation_parameter,
+        })
+    }
 }
 
 /// The response to a collect request
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+/// struct {
+///   HpkeCiphertext encrypted_agg_shares shares<1..2^16-1>;
+/// } CollectResp;
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CollectResponse {
-    pub encrypted_output_shares: Vec<EncryptedOutputShare>,
+    pub encrypted_agg_shares: Vec<hpke::Ciphertext>,
 }
 
-/// Output share request from leader to helper
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
-pub struct OutputShareRequest {
-    pub task_id: TaskId,
-    pub batch_interval: Interval,
-    pub helper_state: Vec<u8>,
+impl Encode for CollectResponse {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        encode_items_u16(bytes, &self.encrypted_agg_shares);
+    }
 }
 
-/// An output share, sent from an aggregator to the collector
-#[derive(Clone, Debug, Derivative, PartialEq, Eq, Deserialize, Serialize)]
-pub struct OutputShare<V: Vdaf> {
-    // Workaround for alleged compiler bug: https://github.com/serde-rs/serde/issues/1296
-    #[serde(deserialize_with = "V::AggregateShare::deserialize")]
-    pub sum: V::AggregateShare,
-    pub contributions: u64,
+impl Decode<()> for CollectResponse {
+    type Error = Error;
+
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+        let encrypted_output_shares = decode_items_u16(&(), bytes)?;
+
+        Ok(Self {
+            encrypted_agg_shares: encrypted_output_shares,
+        })
+    }
 }
 
-/// An encrypted output share, sent from an aggregator to the collector
-#[derive(Clone, Derivative, PartialEq, Eq, Deserialize, Serialize)]
-#[derivative(Debug)]
-pub struct EncryptedOutputShare {
-    pub collector_hpke_config_id: u8,
-    #[serde(rename = "enc")]
-    #[derivative(Debug = "ignore")]
-    pub encapsulated_context: Vec<u8>,
-    /// This is understood to be ciphertext || tag
-    #[derivative(Debug = "ignore")]
-    pub payload: Vec<u8>,
-}
-
-pub async fn run_collect(
+pub async fn run_collect<C: Collector>(
     ppm_parameters: &Parameters,
     hpke_config: &hpke::Config,
     batch_interval: Interval,
-) -> Result<Prio3Result<u64>, Error> {
-    // TODO: make this generic over Vdaf
-    let vdaf = Prio3Sum64::new(Suite::Blake3, 2, 63)?;
-
+    vdaf: C,
+    aggregation_parameter: &C::AggregationParam,
+) -> Result<C::AggregateResult, Error> {
     let http_client = Client::builder().user_agent(COLLECTOR_USER_AGENT).build()?;
 
-    let collect_request = CollectRequest {
+    let collect_request: CollectRequest<C> = CollectRequest {
         task_id: ppm_parameters.task_id,
         batch_interval,
-        aggregation_parameter: None,
+        aggregation_parameter: aggregation_parameter.clone(),
     };
 
     let collect_response = http_client
         .post(ppm_parameters.collect_endpoint()?)
-        .json(&collect_request)
+        .body(collect_request.get_encoded())
         .send()
         .await?;
 
@@ -137,40 +165,45 @@ pub async fn run_collect(
         }
     }
 
-    let collect_response_body: CollectResponse = collect_response.json().await?;
-    let leader_recipient = hpke_config.output_share_recipient(
+    let collect_response = CollectResponse::get_decoded(&(), &collect_response.bytes().await?)?;
+
+    let leader_ciphertext = &collect_response.encrypted_agg_shares[Role::Leader.index()];
+
+    let leader_recipient = hpke_config.recipient(
         &ppm_parameters.task_id,
+        hpke::Label::AggregateShare,
         Role::Leader,
-        &collect_response_body.encrypted_output_shares[Role::Leader.index()].encapsulated_context,
+        Role::Collector,
+        &leader_ciphertext.encapsulated_context,
     )?;
 
-    // TODO: make this generic over Vdaf
-    let decrypted_leader_share: OutputShare<Prio3Sum64> =
-        serde_json::from_slice(&leader_recipient.decrypt_output_share(
-            &collect_response_body.encrypted_output_shares[Role::Leader.index()],
-            batch_interval,
-        )?)?;
-
-    let helper_recipient = hpke_config.output_share_recipient(
-        &ppm_parameters.task_id,
-        Role::Helper,
-        &collect_response_body.encrypted_output_shares[Role::Helper.index()].encapsulated_context,
-    )?;
-    let decrypted_helper_share: OutputShare<Prio3Sum64> =
-        serde_json::from_slice(&helper_recipient.decrypt_output_share(
-            &collect_response_body.encrypted_output_shares[Role::Helper.index()],
-            batch_interval,
-        )?)?;
-
-    if decrypted_leader_share.contributions != decrypted_helper_share.contributions {
-        return Err(Error::LengthMismatch(
-            decrypted_leader_share.contributions,
-            decrypted_helper_share.contributions,
-        ));
-    }
-
-    Ok(vdaf.unshard(
+    let leader_share = C::AggregateShare::get_decoded(
         &(),
-        [decrypted_leader_share.sum, decrypted_helper_share.sum],
-    )?)
+        &leader_recipient.open(leader_ciphertext, &batch_interval.associated_data())?,
+    )?;
+
+    let helper_ciphertext = &collect_response.encrypted_agg_shares[Role::Helper.index()];
+
+    let helper_recipient = hpke_config.recipient(
+        &ppm_parameters.task_id,
+        hpke::Label::AggregateShare,
+        Role::Helper,
+        Role::Collector,
+        &helper_ciphertext.encapsulated_context,
+    )?;
+
+    let helper_share = C::AggregateShare::get_decoded(
+        &(),
+        &helper_recipient.open(helper_ciphertext, &batch_interval.associated_data())?,
+    )?;
+
+    // TODO: include contribution count in aggregate share somehow
+    // if decrypted_leader_share.contributions != decrypted_helper_share.contributions {
+    //     return Err(Error::LengthMismatch(
+    //         decrypted_leader_share.contributions,
+    //         decrypted_helper_share.contributions,
+    //     ));
+    // }
+
+    Ok(vdaf.unshard(aggregation_parameter, [leader_share, helper_share])?)
 }

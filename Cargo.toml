@@ -7,6 +7,7 @@ edition = "2018"
 [dependencies]
 assert_matches = "1.5.0"
 base64 = "0.13.0"
+bytes = "1.1.0"
 chrono = { version = "0.4", features = ["serde", "std"] }
 color-eyre = "^0.5"
 derivative = "2.1.1"
@@ -15,7 +16,9 @@ hpke = { version = "^0.8", features = ["default", "serde_impls", "std"] }
 hex = { version = "0.4.3", features = ["serde"] }
 http = "^0.2"
 http-api-problem = { version = "0.50.2", features = ["warp"] }
-prio = { git = "https://github.com/abetterinternet/libprio-rs", rev = "5931ba31d768503f7e5c5c70a8ec1fe50272d1a1" }
+num_enum = "0.5.6"
+#prio = { git = "https://github.com/abetterinternet/libprio-rs", rev = "5931ba31d768503f7e5c5c70a8ec1fe50272d1a1" }
+prio = { path = "/home/timg/source/libprio-rs" }
 rand = "0.8"
 reqwest = { version = "0.11.4", features = ["rustls", "json"] }
 serde = { version = "^1.0", features = ["derive"] }

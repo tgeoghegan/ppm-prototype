@@ -1,16 +1,9 @@
-use crate::{
-    hpke,
-    parameters::Parameters,
-    upload::{EncryptedInputShare, Report},
-    Nonce, Role, Time,
-};
-use ::hpke::Serializable;
-use http::StatusCode;
-use prio::vdaf::{
-    prio3::Prio3Sum64,
-    suite::{Key, Suite},
-    Client,
-};
+use crate::{hpke, parameters::Parameters, report::Report, Nonce, Role, Time};
+use http::{header::CONTENT_TYPE, StatusCode};
+use http_api_problem::HttpApiProblem;
+use prio::{codec::Encode, vdaf::Client};
+use reqwest::Response;
+use tracing::info;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -28,6 +21,10 @@ pub enum Error {
     Json(#[from] serde_json::Error),
     #[error("Unspecified error: {0}")]
     Unspecified(String),
+    #[error("HTTP problem document {0}")]
+    ProblemDocument(HttpApiProblem),
+    #[error("HTTP response status {0} body:\n{1:?}")]
+    HttpFailure(StatusCode, Option<Response>),
 }
 
 static CLIENT_USER_AGENT: &str = concat!(
@@ -39,19 +36,22 @@ static CLIENT_USER_AGENT: &str = concat!(
 );
 
 #[derive(Debug)]
-pub struct PpmClient {
+pub struct PpmClient<C: Client> {
     http_client: reqwest::Client,
     parameters: Parameters,
     leader_hpke_config: hpke::Config,
     helper_hpke_config: hpke::Config,
-    // TODO: make PpmClient generic over `Vdaf`, or has-a Box<dyn Vdaf>
-    vdaf: Prio3Sum64,
-    pub tamper_with_helper_proof: bool,
-    pub tamper_with_leader_proof: bool,
+    vdaf: C,
+    public_parameter: C::PublicParam,
 }
 
-impl PpmClient {
-    pub async fn new(ppm_parameters: &Parameters) -> Result<Self, Error> {
+impl<C: Client> PpmClient<C> {
+    #[tracing::instrument(err)]
+    pub async fn new(
+        ppm_parameters: &Parameters,
+        vdaf_client: &C,
+        public_parameter: C::PublicParam,
+    ) -> Result<Self, Error> {
         let http_client = reqwest::Client::builder()
             .user_agent(CLIENT_USER_AGENT)
             .build()?;
@@ -62,18 +62,33 @@ impl PpmClient {
             .hpke_config(Role::Helper, &http_client)
             .await?;
 
+        info!(?leader_hpke_config);
+
         Ok(Self {
             http_client,
             parameters: ppm_parameters.clone(),
             leader_hpke_config,
             helper_hpke_config,
-            vdaf: Prio3Sum64::new(Suite::Blake3, 2, 63)?,
-            tamper_with_helper_proof: false,
-            tamper_with_leader_proof: false,
+            vdaf: vdaf_client.clone(),
+            public_parameter,
         })
     }
 
-    pub async fn do_upload(&self, time: u64, input: u128) -> Result<(), Error> {
+    pub async fn do_upload(&self, time: u64, input: &C::Measurement) -> Result<(), Error> {
+        let tamper_func = |input_share: &C::InputShare| input_share.clone();
+        let tamper_func_ref = &tamper_func as &dyn Fn(&C::InputShare) -> C::InputShare;
+
+        self.do_upload_tamper(time, input, tamper_func_ref, tamper_func_ref)
+            .await
+    }
+
+    pub async fn do_upload_tamper(
+        &self,
+        time: u64,
+        input: &C::Measurement,
+        tamper_leader_share: &dyn Fn(&C::InputShare) -> C::InputShare,
+        tamper_helper_share: &dyn Fn(&C::InputShare) -> C::InputShare,
+    ) -> Result<(), Error> {
         let timestamp = Nonce {
             time: Time(time),
             rand: rand::random(),
@@ -81,74 +96,92 @@ impl PpmClient {
 
         // Generate a Prio input and proof. The serialized format is input share
         // then proof share.
-        let mut upload_messages = self.vdaf.shard(&(), &input)?;
+        let upload_shares = self.vdaf.shard(&self.public_parameter, input)?;
 
-        // If requested, tamper with joint randomness seed hint, which will
-        // cause proof verification to fail
-        if self.tamper_with_leader_proof {
-            upload_messages[Role::Leader.index()].joint_rand_seed_hint =
-                Key::generate(Suite::Aes128CtrHmacSha256)?;
-        }
+        // Allow the caller to tamper with the input shares to force proof
+        // verification to fail
+        let leader_upload_share =
+            tamper_leader_share(&upload_shares[Role::Leader.index()]).get_encoded();
+        let helper_upload_share =
+            tamper_helper_share(&upload_shares[Role::Helper.index()]).get_encoded();
+        info!(
+            helper_upload_share = ?upload_shares[Role::Helper.index()],
+            tampered_helper_upload_share =
+                ?tamper_helper_share(&upload_shares[Role::Helper.index()]),
+            tampered_helper_upload_share_len = helper_upload_share.len(),
+            "encoding helper share"
+        );
 
-        if self.tamper_with_helper_proof {
-            upload_messages[Role::Helper.index()].joint_rand_seed_hint =
-                Key::generate(Suite::Aes128CtrHmacSha256)?;
-        }
+        let leader_hpke_sender = self.leader_hpke_config.sender(
+            &self.parameters.task_id,
+            hpke::Label::InputShare,
+            Role::Client,
+            Role::Leader,
+        )?;
 
-        // `Report.EncryptedInputShare.payload` is the encryption of a serialized
-        // Prio `Upload[Message]`. Eventually we will implement serialization to
-        // TLS presentation language, but for the time being we use JSON, hence
-        // these explicit serde_json::to_vec calls. This is probably brittle because
-        // we're depending on Serde to emit a "canonical" JSON encoding of a
-        // message.
-        let json_leader_share = serde_json::to_vec(&upload_messages[Role::Leader.index()])?;
-        let json_helper_share = serde_json::to_vec(&upload_messages[Role::Helper.index()])?;
+        let helper_hpke_sender = self.helper_hpke_config.sender(
+            &self.parameters.task_id,
+            hpke::Label::InputShare,
+            Role::Client,
+            Role::Helper,
+        )?;
 
-        // We have to create a new HPKE context for each message, or the nonces
-        // won't line up with the recipient.
-        let leader_hpke_sender = self
-            .leader_hpke_config
-            .report_sender(&self.parameters.task_id, Role::Leader)?;
-
-        let helper_hpke_sender = self
-            .helper_hpke_config
-            .report_sender(&self.parameters.task_id, Role::Helper)?;
-
-        let (leader_payload, leader_encapped_key) =
-            leader_hpke_sender.encrypt_input_share(timestamp, &json_leader_share)?;
-        let (helper_payload, helper_encapped_key) =
-            helper_hpke_sender.encrypt_input_share(timestamp, &json_helper_share)?;
+        let extensions = vec![];
+        let associated_data = Report::associated_data(timestamp, &extensions);
 
         let report = Report {
-            timestamp,
+            nonce: timestamp,
             task_id: self.parameters.task_id,
             encrypted_input_shares: vec![
-                EncryptedInputShare {
-                    aggregator_config_id: self.leader_hpke_config.id.0,
-                    encapsulated_context: leader_encapped_key.to_bytes().to_vec(),
-                    payload: leader_payload,
-                },
-                EncryptedInputShare {
-                    aggregator_config_id: self.helper_hpke_config.id.0,
-                    encapsulated_context: helper_encapped_key.to_bytes().to_vec(),
-                    payload: helper_payload,
-                },
+                leader_hpke_sender.seal(&leader_upload_share, &associated_data)?,
+                helper_hpke_sender.seal(&helper_upload_share, &associated_data)?,
             ],
             extensions: vec![],
         };
 
-        let status = self
+        let upload_response = self
             .http_client
             .post(self.parameters.upload_endpoint()?)
-            .json(&report)
+            .body(report.get_encoded())
             .send()
-            .await?
-            .status();
-        if status != StatusCode::OK {
-            return Err(Error::Unspecified(format!(
-                "unexpected HTTP status in upload request {:?}",
-                status
-            )));
+            .await?;
+        let status = upload_response.status();
+        if !status.is_success() {
+            match upload_response.headers().get(CONTENT_TYPE) {
+                Some(content_type) if content_type == "application/problem+json" => {
+                    match upload_response.json().await {
+                        Ok(problem_document) => {
+                            return Err(Error::ProblemDocument(problem_document))
+                        }
+                        Err(_) => return Err(Error::HttpFailure(status, None)),
+                    }
+                }
+                _ => return Err(Error::HttpFailure(status, Some(upload_response))),
+            }
+        }
+
+        Ok(())
+    }
+
+    pub async fn run_aggregate(&self) -> Result<(), Error> {
+        let aggregate_response = self
+            .http_client
+            .post(self.parameters.leader_aggregate_endpoint()?)
+            .send()
+            .await?;
+        let status = aggregate_response.status();
+        if !status.is_success() {
+            match aggregate_response.headers().get(CONTENT_TYPE) {
+                Some(content_type) if content_type == "application/problem+json" => {
+                    match aggregate_response.json().await {
+                        Ok(problem_document) => {
+                            return Err(Error::ProblemDocument(problem_document))
+                        }
+                        Err(_) => return Err(Error::HttpFailure(status, None)),
+                    }
+                }
+                _ => return Err(Error::HttpFailure(status, Some(aggregate_response))),
+            }
         }
 
         Ok(())

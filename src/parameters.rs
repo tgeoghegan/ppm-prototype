@@ -4,12 +4,17 @@
 //! and related types.
 
 use crate::{config_path, hpke, Duration, Interval, Role};
-use chrono::{TimeZone, Utc};
-use hex::FromHex;
+use prio::codec::{Decode, Encode};
 use rand::{thread_rng, Rng};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use std::{convert::AsRef, fmt::Display, fs::File, io::Read, path::PathBuf};
+use std::{
+    convert::{AsRef, TryInto},
+    fmt::Display,
+    fs::File,
+    io::{Cursor, Read},
+    path::PathBuf,
+};
 use url::Url;
 
 #[derive(Debug, thiserror::Error)]
@@ -22,13 +27,20 @@ pub enum Error {
     Reqwest(#[from] reqwest::Error),
     #[error("file error: {1}")]
     File(#[source] std::io::Error, PathBuf),
+    #[error("HPKE error")]
+    Hpke(#[from] hpke::Error),
+    #[error("I/O error")]
+    Io(#[from] std::io::Error),
 }
 
 /// The configuration parameters for a PPM task, corresponding to
 /// `struct Param` in §4.1 of RFCXXXX.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct Parameters {
-    #[serde(with = "hex")]
+    #[serde(
+        serialize_with = "crate::base64::serialize_bytes",
+        deserialize_with = "crate::base64::deserialize_bytes"
+    )]
     pub task_id: TaskId,
     pub aggregator_endpoints: Vec<Url>,
     pub collector_config: hpke::Config,
@@ -40,12 +52,19 @@ pub struct Parameters {
     pub min_batch_duration: Duration,
     /// HMAC-SHA256 key used to authenticate messages exchanged between
     /// aggregators
-    #[serde(with = "hex")]
-    pub aggregator_auth_key: [u8; 32],
+    #[serde(
+        serialize_with = "crate::base64::serialize_bytes",
+        deserialize_with = "crate::base64::deserialize_bytes"
+    )]
+    // TODO better type for this
+    pub aggregator_auth_key: Vec<u8>,
     /// What VDAF are we running
     pub vdaf: VdafLabel,
     /// VDAF verification parameter as an opaque byte string
-    #[serde(with = "hex")]
+    #[serde(
+        serialize_with = "crate::base64::serialize_bytes",
+        deserialize_with = "crate::base64::deserialize_bytes"
+    )]
     pub vdaf_verification_parameter: Vec<u8>,
 }
 
@@ -82,13 +101,17 @@ impl Parameters {
         role: Role,
         http_client: &Client,
     ) -> Result<hpke::Config, Error> {
-        let hpke_config = http_client
+        let body_bytes = http_client
             .get(self.hpke_config_endpoint(role)?)
             .send()
             .await?
-            .json()
+            .bytes()
             .await?;
-        Ok(hpke_config)
+
+        Ok(hpke::Config::decode(
+            &(),
+            &mut Cursor::new(body_bytes.as_ref()),
+        )?)
     }
 
     pub fn upload_endpoint(&self) -> Result<Url, Error> {
@@ -103,18 +126,21 @@ impl Parameters {
         Ok(self.aggregator_endpoint(Role::Helper).join("aggregate")?)
     }
 
-    pub fn output_share_endpoint(&self) -> Result<Url, Error> {
+    pub fn leader_aggregate_endpoint(&self) -> Result<Url, Error> {
+        Ok(self.aggregator_endpoint(Role::Leader).join("aggregate")?)
+    }
+
+    pub fn aggregate_share_endpoint(&self) -> Result<Url, Error> {
         Ok(self
             .aggregator_endpoint(Role::Helper)
-            .join("output_share")?)
+            .join("aggregate_share")?)
     }
 
     /// Returns true if the batch interval is aligned with and greater than the
     /// minimum batch duration
     pub(crate) fn validate_batch_interval(&self, batch_interval: Interval) -> bool {
         batch_interval.duration.0 >= self.min_batch_duration.0
-            && batch_interval.start.interval_start(self.min_batch_duration)
-                == Utc.timestamp(batch_interval.start.0 as i64, 0)
+            && batch_interval.start.interval_start(self.min_batch_duration) == batch_interval.start
             && batch_interval.duration.0 % self.min_batch_duration.0 == 0
     }
 }
@@ -145,11 +171,25 @@ impl AsRef<[u8]> for TaskId {
     }
 }
 
-impl FromHex for TaskId {
-    type Error = hex::FromHexError;
+impl From<Vec<u8>> for TaskId {
+    fn from(v: Vec<u8>) -> Self {
+        Self(v.try_into().unwrap())
+    }
+}
 
-    fn from_hex<T: AsRef<[u8]>>(hex: T) -> Result<Self, Self::Error> {
-        Ok(Self(<[u8; 32]>::from_hex(hex)?))
+impl Encode for TaskId {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        bytes.extend_from_slice(&self.0)
+    }
+}
+
+impl Decode<()> for TaskId {
+    type Error = Error;
+
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+        let mut decoded = [0u8; 32];
+        bytes.read_exact(&mut decoded)?;
+        Ok(Self(decoded))
     }
 }
 
@@ -185,19 +225,19 @@ mod tests {
                 kem_id: hpke::KeyEncapsulationMechanism::X25519HkdfSha256,
                 kdf_id: hpke::KeyDerivationFunction::HkdfSha256,
                 aead_id: hpke::AuthenticatedEncryptionWithAssociatedData::ChaCha20Poly1305,
-                public_key: vec![
+                public_key: hpke::PublicKey::new(vec![
                     3, 20, 3, 245, 218, 218, 141, 106, 244, 32, 137, 7, 239, 142, 236, 187, 223,
                     40, 226, 20, 103, 206, 127, 111, 201, 43, 163, 129, 97, 74, 254, 75,
-                ],
-                private_key: Some(vec![
+                ]),
+                private_key: Some(hpke::PrivateKey::new(vec![
                     200, 136, 138, 82, 174, 13, 162, 51, 213, 94, 11, 15, 141, 167, 166, 44, 216,
                     99, 180, 36, 212, 230, 85, 89, 67, 139, 199, 181, 108, 134, 250, 89,
-                ]),
+                ])),
             },
             max_batch_lifetime: 1,
             min_batch_size: 100,
             min_batch_duration: Duration(100000),
-            aggregator_auth_key: [
+            aggregator_auth_key: vec![
                 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
                 10, 11, 12, 13, 14, 15,
             ],
@@ -207,7 +247,7 @@ mod tests {
 
         let json_string = r#"
 {
-    "task_id": "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f",
+    "task_id": "AAECAwQFBgcICQoLDA0ODwABAgMEBQYHCAkKCwwNDg8=",
     "aggregator_endpoints": [
         "https://leader.fake/",
         "https://helper.fake/"
@@ -228,7 +268,7 @@ mod tests {
             "bits": 64
         }
     },
-    "aggregator_auth_key": "000102030405060708090a0b0c0d0e0f000102030405060708090a0b0c0d0e0f",
+    "aggregator_auth_key": "AAECAwQFBgcICQoLDA0ODwABAgMEBQYHCAkKCwwNDg8=",
     "vdaf_verification_parameter": ""
 }
 "#;

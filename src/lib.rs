@@ -6,35 +6,49 @@ pub mod helper;
 pub mod hpke;
 pub mod leader;
 pub mod parameters;
+pub mod report;
 pub mod trace;
-pub mod upload;
 
-use chrono::{DateTime, DurationRound, TimeZone, Utc};
+use chrono::{DurationRound, TimeZone, Utc};
 use directories::ProjectDirs;
+use prio::codec::{Decode, Encode};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::{
     convert::Infallible,
     fmt::{self, Display, Formatter},
+    io::Cursor,
     path::PathBuf,
 };
 use warp::Filter;
 
 /// Seconds elapsed since start of UNIX epoch
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd)]
 pub struct Time(pub u64);
 
 impl Time {
     /// Determine the start of the aggregation window that this report falls in,
     /// assuming the provided minimum batch duration
-    fn interval_start(self, min_batch_duration: Duration) -> DateTime<Utc> {
-        Utc.timestamp(self.0 as i64, 0)
-            .duration_trunc(chrono::Duration::seconds(min_batch_duration.0 as i64))
-            .unwrap()
+    fn interval_start(self, min_batch_duration: Duration) -> Self {
+        Self(
+            Utc.timestamp(self.0 as i64, 0)
+                .duration_trunc(chrono::Duration::seconds(min_batch_duration.0 as i64))
+                .unwrap()
+                .timestamp() as u64,
+        )
     }
 
     fn add(self, duration: Duration) -> Self {
         Self(self.0 + duration.0)
+    }
+
+    /// Returns the batch interval that this instant falls into, based on the
+    /// provided minimum batch duration.
+    pub(crate) fn batch_interval(&self, min_batch_duration: Duration) -> Interval {
+        Interval {
+            start: self.interval_start(min_batch_duration),
+            duration: min_batch_duration,
+        }
     }
 }
 
@@ -44,13 +58,47 @@ impl Display for Time {
     }
 }
 
+impl Encode for Time {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.0.encode(bytes);
+    }
+}
+
+impl Decode<()> for Time {
+    type Error = std::io::Error;
+
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+        Ok(Self(u64::decode(&(), bytes)?))
+    }
+}
+
 /// Seconds elapsed between two instances
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Hash, Eq, PartialEq, Ord, PartialOrd, Serialize, Deserialize)]
 pub struct Duration(pub u64);
+
+impl Duration {
+    pub fn multiple(self, factor: u64) -> Self {
+        Self(self.0 * factor)
+    }
+}
 
 impl Display for Duration {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.0)
+    }
+}
+
+impl Encode for Duration {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.0.encode(bytes);
+    }
+}
+
+impl Decode<()> for Duration {
+    type Error = std::io::Error;
+
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+        Ok(Self(u64::decode(&(), bytes)?))
     }
 }
 
@@ -59,7 +107,7 @@ impl Display for Duration {
 // Deriving [`PartialOrd`] yields a "lexicographic ordering based on the
 // top-to-bottom declaration order of the struct's members."
 // https://doc.rust-lang.org/std/cmp/trait.PartialOrd.html#derivable
-#[derive(Clone, Copy, Debug, Eq, PartialEq, PartialOrd, Ord, Deserialize, Serialize)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 pub struct Nonce {
     /// Time at which the report was generated
     pub time: Time,
@@ -73,15 +121,26 @@ impl Display for Nonce {
     }
 }
 
-impl Nonce {
-    /// Construct HPKE AEAD associated data for the nonce
-    pub fn associated_data(&self) -> Vec<u8> {
-        [self.time.0.to_be_bytes(), self.rand.to_be_bytes()].concat()
+impl Encode for Nonce {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.time.encode(bytes);
+        self.rand.encode(bytes);
+    }
+}
+
+impl Decode<()> for Nonce {
+    type Error = std::io::Error;
+
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+        let time = Time::decode(&(), bytes)?;
+        let rand = u64::decode(&(), bytes)?;
+
+        Ok(Self { time, rand })
     }
 }
 
 /// Interval of time.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
 pub struct Interval {
     /// Start of the interval, included.
     pub start: Time,
@@ -105,6 +164,24 @@ impl Interval {
 impl Display for Interval {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "[{} - {})", self.start, self.start.add(self.duration))
+    }
+}
+
+impl Encode for Interval {
+    fn encode(&self, bytes: &mut Vec<u8>) {
+        self.start.encode(bytes);
+        self.duration.encode(bytes);
+    }
+}
+
+impl Decode<()> for Interval {
+    type Error = std::io::Error;
+
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+        let start = Time::decode(&(), bytes)?;
+        let duration = Duration::decode(&(), bytes)?;
+
+        Ok(Self { start, duration })
     }
 }
 
@@ -144,4 +221,39 @@ pub fn with_shared_value<T: Clone + Sync + Send>(
     value: T,
 ) -> impl Filter<Extract = (T,), Error = Infallible> + Clone {
     warp::any().map(move || value.clone())
+}
+
+mod base64 {
+    //! Custom serialization module used to serialize byte sequences to base64
+    use serde::{de::Error, Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize_bytes<V: AsRef<[u8]>, S: Serializer>(v: &V, s: S) -> Result<S::Ok, S::Error> {
+        String::serialize(&base64::encode(&v), s)
+    }
+
+    pub fn deserialize_bytes<'de, D: Deserializer<'de>, V: From<Vec<u8>>>(
+        d: D,
+    ) -> Result<V, D::Error> {
+        let bytes = base64::decode(String::deserialize(d)?.as_bytes()).map_err(Error::custom)?;
+        let v = V::from(bytes);
+        Ok(v)
+    }
+
+    pub fn serialize_bytes_option<V: AsRef<[u8]>, S: Serializer>(
+        v: &Option<V>,
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        match v {
+            Some(v) => String::serialize(&base64::encode(&v), s),
+            None => <Option<Vec<u8>>>::serialize(&None, s),
+        }
+    }
+
+    pub fn deserialize_bytes_option<'de, D: Deserializer<'de>, V: From<Vec<u8>>>(
+        d: D,
+    ) -> Result<Option<V>, D::Error> {
+        let bytes = base64::decode(String::deserialize(d)?.as_bytes()).map_err(Error::custom)?;
+        let v = V::from(bytes);
+        Ok(Some(v))
+    }
 }
