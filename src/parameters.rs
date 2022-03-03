@@ -4,7 +4,7 @@
 //! and related types.
 
 use crate::{config_path, hpke, Duration, Interval, Role};
-use prio::codec::{Decode, Encode};
+use prio::codec::{CodecError, Decode, Encode};
 use rand::{thread_rng, Rng};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,8 @@ pub enum Error {
     Hpke(#[from] hpke::Error),
     #[error("I/O error")]
     Io(#[from] std::io::Error),
+    #[error("Codec error")]
+    Codec(#[from] prio::codec::CodecError),
 }
 
 /// The configuration parameters for a PPM task, corresponding to
@@ -184,9 +186,7 @@ impl Encode for TaskId {
 }
 
 impl Decode<()> for TaskId {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let mut decoded = [0u8; 32];
         bytes.read_exact(&mut decoded)?;
         Ok(Self(decoded))

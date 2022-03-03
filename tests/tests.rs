@@ -12,9 +12,9 @@ use ppm_prototype::{
     trace, Duration, Interval, Role, Time,
 };
 use prio::{
-    field::Field96,
+    field::Field128,
     vdaf::{
-        prio3::{Prio3InputShare, Prio3Sum64, Prio3VerifyParam},
+        prio3::{JointRandParam, Prio3InputShare, Prio3Sum64, Prio3VerifyParam},
         suite::{Key, Suite},
     },
 };
@@ -57,7 +57,7 @@ impl TestCase {
         let helper_vdaf = leader_vdaf.clone();
         let client_vdaf = leader_vdaf.clone();
 
-        let leader_pcp_type: prio::pcp::types::Sum<Field96> =
+        let leader_pcp_type: prio::pcp::types::Sum<Field128> =
             prio::pcp::types::Sum::new(63).unwrap();
         let helper_pcp_type = leader_pcp_type.clone();
 
@@ -92,25 +92,29 @@ impl TestCase {
         let client = PpmClient::new(&parameters, &client_vdaf, ()).await.unwrap();
 
         let tamper_leader_proof_func = if tamper_leader_proof {
-            |input_share: &Prio3InputShare<Field96>| {
+            |input_share: &Prio3InputShare<Field128>| {
                 let mut tampered_input_share = input_share.clone();
-                tampered_input_share.joint_rand_seed_hint =
-                    Key::generate(Suite::Aes128CtrHmacSha256).unwrap();
+                tampered_input_share.joint_rand_param = Some(JointRandParam {
+                    seed_hint: Key::generate(Suite::Aes128CtrHmacSha256).unwrap(),
+                    blind: Key::generate(Suite::Aes128CtrHmacSha256).unwrap(),
+                });
                 tampered_input_share
             }
         } else {
-            |s: &Prio3InputShare<Field96>| s.clone()
+            |s: &Prio3InputShare<Field128>| s.clone()
         };
 
         let tamper_helper_proof_func = if tamper_helper_proof {
-            |input_share: &Prio3InputShare<Field96>| {
+            |input_share: &Prio3InputShare<Field128>| {
                 let mut tampered_input_share = input_share.clone();
-                tampered_input_share.joint_rand_seed_hint =
-                    Key::generate(Suite::Aes128CtrHmacSha256).unwrap();
+                tampered_input_share.joint_rand_param = Some(JointRandParam {
+                    seed_hint: Key::generate(Suite::Aes128CtrHmacSha256).unwrap(),
+                    blind: Key::generate(Suite::Aes128CtrHmacSha256).unwrap(),
+                });
                 tampered_input_share
             }
         } else {
-            |s: &Prio3InputShare<Field96>| s.clone()
+            |s: &Prio3InputShare<Field128>| s.clone()
         };
 
         for count in 0..100 {
@@ -119,9 +123,9 @@ impl TestCase {
                     INTERVAL_START + count,
                     &1,
                     &tamper_leader_proof_func
-                        as &dyn Fn(&Prio3InputShare<Field96>) -> Prio3InputShare<Field96>,
+                        as &dyn Fn(&Prio3InputShare<Field128>) -> Prio3InputShare<Field128>,
                     &tamper_helper_proof_func
-                        as &dyn Fn(&Prio3InputShare<Field96>) -> Prio3InputShare<Field96>,
+                        as &dyn Fn(&Prio3InputShare<Field128>) -> Prio3InputShare<Field128>,
                 )
                 .await
                 .unwrap();
@@ -157,6 +161,7 @@ impl TestCase {
 #[serial]
 async fn successful_aggregate() {
     let test_case = TestCase::new().await;
+    let aggregate_share_len = test_case.vdaf.output_len();
 
     // The interval should capture all inputs send by client
     let collect_interval = Interval {
@@ -171,6 +176,7 @@ async fn successful_aggregate() {
         collect_interval,
         test_case.vdaf.clone(),
         &(),
+        aggregate_share_len,
     )
     .await
     .unwrap();
@@ -184,6 +190,8 @@ async fn successful_aggregate() {
 #[serial]
 async fn insufficient_batch_size() {
     let test_case = TestCase::new().await;
+    let aggregate_share_len = test_case.vdaf.output_len();
+
     // Not enough inputs in the interval to meet min batch size
     let error_document = run_collect(
         &test_case.parameters,
@@ -194,6 +202,7 @@ async fn insufficient_batch_size() {
         },
         test_case.vdaf.clone(),
         &(),
+        aggregate_share_len,
     )
     .await
     .unwrap_err();
@@ -211,6 +220,8 @@ async fn insufficient_batch_size() {
 #[serial]
 async fn exceed_privacy_budget() {
     let test_case = TestCase::new().await;
+    let aggregate_share_len = test_case.vdaf.output_len();
+
     // The interval should capture all inputs send by client
     let collect_interval = Interval {
         start: Time(INTERVAL_START),
@@ -224,6 +235,7 @@ async fn exceed_privacy_budget() {
         collect_interval,
         test_case.vdaf.clone(),
         &(),
+        aggregate_share_len,
     )
     .await
     .unwrap();
@@ -238,6 +250,7 @@ async fn exceed_privacy_budget() {
         collect_interval,
         test_case.vdaf.clone(),
         &(),
+        aggregate_share_len,
     )
     .await
     .unwrap_err();
@@ -255,6 +268,8 @@ async fn exceed_privacy_budget() {
 #[serial]
 async fn unaligned_batch_interval() {
     let test_case = TestCase::new().await;
+    let aggregate_share_len = test_case.vdaf.output_len();
+
     let error_document = run_collect(
         &test_case.parameters,
         &test_case.hpke_config.collector,
@@ -264,6 +279,7 @@ async fn unaligned_batch_interval() {
         },
         test_case.vdaf.clone(),
         &(),
+        aggregate_share_len,
     )
     .await
     .unwrap_err();
@@ -281,6 +297,7 @@ async fn unaligned_batch_interval() {
 #[serial]
 async fn batch_interval_too_short() {
     let test_case = TestCase::new().await;
+    let aggregate_share_len = test_case.vdaf.output_len();
 
     let error_document = run_collect(
         &test_case.parameters,
@@ -291,6 +308,7 @@ async fn batch_interval_too_short() {
         },
         test_case.vdaf.clone(),
         &(),
+        aggregate_share_len,
     )
     .await
     .unwrap_err();
@@ -308,6 +326,7 @@ async fn batch_interval_too_short() {
 #[serial]
 async fn invalid_helper_proof() {
     let test_case = TestCase::new_tamper(false, true).await;
+    let aggregate_share_len = test_case.vdaf.output_len();
 
     let error_document = run_collect(
         &test_case.parameters,
@@ -318,6 +337,7 @@ async fn invalid_helper_proof() {
         },
         test_case.vdaf.clone(),
         &(),
+        aggregate_share_len,
     )
     .await
     .unwrap_err();
@@ -338,6 +358,7 @@ async fn invalid_helper_proof() {
 #[serial]
 async fn invalid_leader_proof() {
     let test_case = TestCase::new_tamper(true, false).await;
+    let aggregate_share_len = test_case.vdaf.output_len();
 
     let error_document = run_collect(
         &test_case.parameters,
@@ -348,6 +369,7 @@ async fn invalid_leader_proof() {
         },
         test_case.vdaf.clone(),
         &(),
+        aggregate_share_len,
     )
     .await
     .unwrap_err();
@@ -369,6 +391,8 @@ async fn invalid_leader_proof() {
 async fn report_uploaded_after_interval_collected() {
     // Successfully run aggregation over an interval
     let test_case = TestCase::new().await;
+    let aggregate_share_len = test_case.vdaf.output_len();
+
     // The interval should capture all inputs send by client
     let collect_interval = Interval {
         start: Time(INTERVAL_START),
@@ -382,6 +406,7 @@ async fn report_uploaded_after_interval_collected() {
         collect_interval,
         test_case.vdaf.clone(),
         &(),
+        aggregate_share_len,
     )
     .await
     .unwrap();

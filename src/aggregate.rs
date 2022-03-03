@@ -9,14 +9,9 @@ use crate::{
 };
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use prio::{
-    codec::{
-        decode_items_u16, decode_opaque_u16, encode_items_u16, encode_opaque_u16, Decode, Encode,
-    },
+    codec::{decode_u16_items, encode_u16_items, CodecError, Decode, Encode},
     pcp::Type,
-    vdaf::{
-        self, /*poplar1::Poplar1VerifyParam,*/ prio3::Prio3VerifyParam, suite::Key,
-        Aggregatable,
-    },
+    vdaf::{self, prio3::Prio3VerifyParam, suite::Key, Aggregatable, PrepareTransition},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -54,6 +49,10 @@ pub enum Error {
     UnknownHpkeConfig(hpke::ConfigId),
     #[error("unrecognized task ID")]
     UnrecognizedTask(TaskId),
+    #[error("Codec error")]
+    CodecError(#[from] prio::codec::CodecError),
+    #[error("unexpected prepare state transition: {0}")]
+    UnexpectedStateTransition(String),
 }
 
 impl IntoHttpApiProblem for Error {
@@ -98,17 +97,15 @@ pub struct ReportShare {
 impl Encode for ReportShare {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.nonce.encode(bytes);
-        encode_items_u16(bytes, &self.extensions);
+        encode_u16_items(bytes, &self.extensions);
         self.encrypted_input_share.encode(bytes);
     }
 }
 
 impl Decode<()> for ReportShare {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let nonce = Nonce::decode(&(), bytes)?;
-        let extensions = decode_items_u16(&(), bytes)?;
+        let extensions = decode_u16_items(&(), bytes)?;
         let encrypted_input_share = hpke::Ciphertext::decode(&(), bytes)?;
 
         Ok(Self {
@@ -135,7 +132,7 @@ impl Encode for Transition {
         match self {
             Self::Continued { payload } => {
                 0u8.encode(bytes);
-                encode_items_u16(bytes, payload);
+                encode_u16_items(bytes, payload);
             }
             Self::Finished => 1u8.encode(bytes),
             Self::Failed { error } => {
@@ -147,24 +144,22 @@ impl Encode for Transition {
 }
 
 impl Decode<()> for Transition {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let discriminant = u8::decode(&(), bytes)?;
         let value = match discriminant {
             0u8 => Self::Continued {
-                payload: decode_opaque_u16(bytes)?,
+                payload: decode_u16_items(&(), bytes)?,
             },
             1u8 => Self::Finished,
             2u8 => Self::Failed {
                 error: TransitionError::try_from(u8::decode(&(), bytes)?)
-                    .map_err(|e| Error::Codec(format!("unexpected transition error {}", e)))?,
+                    .map_err(|e| CodecError::Other(Box::new(e)))?,
             },
             d => {
-                return Err(Error::Codec(format!(
+                return Err(CodecError::Other(Box::new(Error::Codec(format!(
                     "unexpected Transition discriminant {}",
                     d
-                )))
+                )))))
             }
         };
 
@@ -203,9 +198,7 @@ impl Encode for TransitionMessage {
 }
 
 impl Decode<()> for TransitionMessage {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let nonce = Nonce::decode(&(), bytes)?;
         let transition = Transition::decode(&(), bytes)?;
 
@@ -254,9 +247,7 @@ impl Encode for Aggregate {
 }
 
 impl Decode<()> for Aggregate {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let discriminant = u8::decode(&(), bytes)?;
         let value = match discriminant {
             0u8 => Self::Initialize(AggregateInitReq::decode(&(), bytes)?),
@@ -265,10 +256,10 @@ impl Decode<()> for Aggregate {
             3u8 => Self::ShareRequest(AggregateShareReq::decode(&(), bytes)?),
             4u8 => Self::ShareResponse(hpke::Ciphertext::decode(&(), bytes)?),
             d => {
-                return Err(Error::Codec(format!(
+                return Err(CodecError::Other(Box::new(Error::Codec(format!(
                     "unexpected Aggregate discriminant {}",
                     d
-                )))
+                )))))
             }
         };
 
@@ -287,18 +278,16 @@ pub struct AggregateInitReq {
 impl Encode for AggregateInitReq {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.task_id.encode(bytes);
-        encode_opaque_u16(bytes, &self.aggregation_parameter);
-        encode_items_u16(bytes, &self.report_shares);
+        encode_u16_items(bytes, &self.aggregation_parameter);
+        encode_u16_items(bytes, &self.report_shares);
     }
 }
 
 impl Decode<()> for AggregateInitReq {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let task_id = TaskId::decode(&(), bytes)?;
-        let aggregation_parameter = decode_opaque_u16(bytes)?;
-        let report_shares = decode_items_u16(&(), bytes)?;
+        let aggregation_parameter = decode_u16_items(&(), bytes)?;
+        let report_shares = decode_u16_items(&(), bytes)?;
 
         Ok(Self {
             task_id,
@@ -319,18 +308,16 @@ pub struct AggregateReq {
 impl Encode for AggregateReq {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.task_id.encode(bytes);
-        encode_opaque_u16(bytes, &self.helper_state);
-        encode_items_u16(bytes, &self.transitions);
+        encode_u16_items(bytes, &self.helper_state);
+        encode_u16_items(bytes, &self.transitions);
     }
 }
 
 impl Decode<()> for AggregateReq {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let task_id = TaskId::decode(&(), bytes)?;
-        let helper_state = decode_opaque_u16(bytes)?;
-        let transitions = decode_items_u16(&(), bytes)?;
+        let helper_state = decode_u16_items(&(), bytes)?;
+        let transitions = decode_u16_items(&(), bytes)?;
 
         Ok(Self {
             task_id,
@@ -349,17 +336,15 @@ pub struct AggregateResp {
 
 impl Encode for AggregateResp {
     fn encode(&self, bytes: &mut Vec<u8>) {
-        encode_opaque_u16(bytes, &self.helper_state);
-        encode_items_u16(bytes, &self.transitions);
+        encode_u16_items(bytes, &self.helper_state);
+        encode_u16_items(bytes, &self.transitions);
     }
 }
 
 impl Decode<()> for AggregateResp {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
-        let helper_state = decode_opaque_u16(bytes)?;
-        let transitions = decode_items_u16(&(), bytes)?;
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let helper_state = decode_u16_items(&(), bytes)?;
+        let transitions = decode_u16_items(&(), bytes)?;
 
         Ok(Self {
             helper_state,
@@ -383,9 +368,7 @@ impl Encode for AggregateShareReq {
 }
 
 impl Decode<()> for AggregateShareReq {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let task_id = TaskId::decode(&(), bytes)?;
         let batch_interval = Interval::decode(&(), bytes)?;
 
@@ -413,9 +396,7 @@ impl Encode for AggregateMessage {
 }
 
 impl Decode<()> for AggregateMessage {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let aggregate = Aggregate::decode(&(), bytes)?;
         let mut tag = [0u8; 32];
         bytes.read_exact(&mut tag)?;
@@ -458,8 +439,9 @@ impl DefaultVerifyParam for Prio3VerifyParam {
         Self {
             query_rand_init: Key::Blake3([1; 32]),
             aggregator_id: role.index() as u8,
-            uncompressed_input_length: typ.input_len(),
-            uncompressed_proof_length: typ.proof_len(),
+            input_len: typ.input_len(),
+            proof_len: typ.proof_len(),
+            joint_rand_len: typ.joint_rand_len(),
         }
     }
 }
@@ -555,30 +537,12 @@ impl<A: vdaf::Aggregator> Aggregator<A> {
             &input_share,
         )?;
 
-        Ok(self.aggregator.prepare_start(step)?)
-    }
-
-    #[tracing::instrument(skip(self, prepare_message), err)]
-    pub(crate) fn prepare_finish(
-        &self,
-        timestamp: Nonce,
-        step: A::PrepareStep,
-        prepare_message: A::PrepareMessage,
-    ) -> Result<Option<A::OutputShare>, Error> {
-        info!(?timestamp, "verifying proof");
-
-        match self.aggregator.prepare_finish(step, prepare_message) {
-            Ok(output_share) => Ok(Some(output_share)),
-            // Log errors but don't return them as the caller will want to process
-            // all the other reports
-            Err(e) => {
-                warn!(
-                    time = ?timestamp,
-                    error = ?e,
-                    "proof did not check out for report"
-                );
-                Ok(None)
+        match self.aggregator.prepare_step(step, None) {
+            PrepareTransition::Continue(step, message) => Ok((step, message)),
+            PrepareTransition::Finish(f) => {
+                Err(Error::UnexpectedStateTransition(format!("{:?}", f)))
             }
+            PrepareTransition::Fail(err) => Err(Error::Vdaf(err)),
         }
     }
 

@@ -86,6 +86,12 @@ impl IntoHttpApiProblem for http::Error {
     }
 }
 
+impl IntoHttpApiProblem for prio::codec::CodecError {
+    fn problem_document_type(&self) -> Option<ProblemDocumentType> {
+        Some(ProblemDocumentType::UnrecognizedMessage)
+    }
+}
+
 /// warp rejection handler that can be tacked on to routes to construct a
 /// warp::Reply with appropriate status code and JSON body for an HTTP problem
 /// document.

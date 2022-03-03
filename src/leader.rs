@@ -17,7 +17,7 @@ use http::{Response, StatusCode};
 use http_api_problem::HttpApiProblem;
 use prio::{
     codec::{Decode, Encode},
-    vdaf::{self, Aggregator as VdafAggregator, PrepareStep, VdafError},
+    vdaf::{self, Aggregator as VdafAggregator, PrepareTransition, VdafError},
 };
 use reqwest::Client;
 use std::{
@@ -56,6 +56,8 @@ pub enum Error {
     HelperError(#[source] HttpApiProblem),
     #[error("Aggregation error {0}")]
     Aggregation(#[from] crate::aggregate::Error),
+    #[error("Codec error")]
+    Codec(#[from] prio::codec::CodecError),
 }
 
 impl IntoHttpApiProblem for Error {
@@ -316,31 +318,32 @@ impl<A: VdafAggregator + Debug> Leader<A> {
                     ])?;
 
                     // Advance self to round n + 1
-                    if state.is_last_round() {
-                        info!(?leader_report.nonce, "verifying proof");
-                        match self.aggregator.prepare_finish(
-                            leader_report.nonce,
-                            state.clone(),
-                            prepare_message.clone(),
-                        )? {
-                            Some(output_share) => {
-                                info!("proof ok");
-                                leader_report.state = StoredReportState::Finished { output_share }
-                            }
-                            None => {
-                                info!("proof invalid");
-                                continue;
-                            }
+                    match self
+                        .aggregator
+                        .aggregator
+                        .prepare_step(state.clone(), Some(prepare_message.clone()))
+                    {
+                        PrepareTransition::Continue(
+                            next_round_state,
+                            next_round_prepare_message,
+                        ) => {
+                            leader_report.state = StoredReportState::Waiting {
+                                state: next_round_state,
+                                prepare_message: next_round_prepare_message,
+                            };
                         }
-                    } else {
-                        let (next_round_state, next_round_prepare_message) = self
-                            .aggregator
-                            .aggregator
-                            .prepare_next(state.clone(), prepare_message.clone())?;
-                        leader_report.state = StoredReportState::Waiting {
-                            state: next_round_state,
-                            prepare_message: next_round_prepare_message,
-                        };
+                        PrepareTransition::Finish(output_share) => {
+                            leader_report.state = StoredReportState::Finished { output_share };
+                        }
+                        PrepareTransition::Fail(error) => {
+                            warn!(
+                                time = ?leader_report.nonce,
+                                ?error,
+                                "proof did not check out for report"
+                            );
+                            // Process other transitions
+                            continue;
+                        }
                     }
 
                     // Send round n prepare message to helper

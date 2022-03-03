@@ -13,6 +13,7 @@ async fn main() -> Result<()> {
     let ppm_parameters = Parameters::from_config_file()?;
     let hpke_config = hpke::Config::from_config_file(Role::Collector)?;
     let vdaf = Prio3Sum64::new(Suite::Blake3, 2, 63).unwrap();
+    let aggregate_share_length = vdaf.output_len();
 
     let sum = run_collect(
         &ppm_parameters,
@@ -23,6 +24,7 @@ async fn main() -> Result<()> {
         },
         vdaf,
         &(),
+        aggregate_share_length,
     )
     .await?;
 

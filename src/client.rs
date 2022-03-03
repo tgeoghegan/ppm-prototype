@@ -1,4 +1,9 @@
-use crate::{hpke, parameters::Parameters, report::Report, Nonce, Role, Time};
+use crate::{
+    hpke::{self, Label},
+    parameters::Parameters,
+    report::Report,
+    Nonce, Role, Time,
+};
 use http::{header::CONTENT_TYPE, StatusCode};
 use http_api_problem::HttpApiProblem;
 use prio::{codec::Encode, vdaf::Client};
@@ -114,14 +119,14 @@ impl<C: Client> PpmClient<C> {
 
         let leader_hpke_sender = self.leader_hpke_config.sender(
             &self.parameters.task_id,
-            hpke::Label::InputShare,
+            Label::InputShare,
             Role::Client,
             Role::Leader,
         )?;
 
         let helper_hpke_sender = self.helper_hpke_config.sender(
             &self.parameters.task_id,
-            hpke::Label::InputShare,
+            Label::InputShare,
             Role::Client,
             Role::Helper,
         )?;

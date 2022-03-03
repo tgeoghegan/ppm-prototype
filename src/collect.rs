@@ -9,9 +9,7 @@ use crate::{
 use http::{header::CONTENT_TYPE, StatusCode};
 use http_api_problem::HttpApiProblem;
 use prio::{
-    codec::{
-        decode_items_u16, decode_opaque_u16, encode_items_u16, encode_opaque_u16, Decode, Encode,
-    },
+    codec::{decode_u16_items, encode_u16_items, CodecError, Decode, Encode},
     vdaf::{Collector, Vdaf},
 };
 use reqwest::{Client, Response};
@@ -49,6 +47,8 @@ pub enum Error {
     Unspecified(&'static str),
     #[error("I/O error")]
     Io(#[from] std::io::Error),
+    #[error("Codec error")]
+    Codec(#[from] prio::codec::CodecError),
 }
 
 impl IntoHttpApiProblem for Error {
@@ -78,20 +78,18 @@ impl<V: Vdaf> Encode for CollectRequest<V> {
         // CollectReq.agg_param is encoded as a variable length opaque byte
         // string
         let aggregation_parameter_bytes = self.aggregation_parameter.get_encoded();
-        encode_opaque_u16(bytes, &aggregation_parameter_bytes);
+        encode_u16_items(bytes, &aggregation_parameter_bytes);
     }
 }
 
 impl<V: Vdaf> Decode<()> for CollectRequest<V> {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let task_id = TaskId::decode(&(), bytes)?;
         let batch_interval = Interval::decode(&(), bytes)?;
         // CollectReq.agg_param is encoded as a variable length opaque byte
         // string. Decode the byte string into Vec<u8>, then decode that into
         // V::AggregationParam.
-        let aggregation_parameter_bytes = decode_opaque_u16(bytes)?;
+        let aggregation_parameter_bytes = decode_u16_items(&(), bytes)?;
         let aggregation_parameter =
             V::AggregationParam::get_decoded(&(), &aggregation_parameter_bytes)?;
 
@@ -114,15 +112,13 @@ pub struct CollectResponse {
 
 impl Encode for CollectResponse {
     fn encode(&self, bytes: &mut Vec<u8>) {
-        encode_items_u16(bytes, &self.encrypted_agg_shares);
+        encode_u16_items(bytes, &self.encrypted_agg_shares);
     }
 }
 
 impl Decode<()> for CollectResponse {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
-        let encrypted_output_shares = decode_items_u16(&(), bytes)?;
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let encrypted_output_shares = decode_u16_items(&(), bytes)?;
 
         Ok(Self {
             encrypted_agg_shares: encrypted_output_shares,
@@ -136,6 +132,7 @@ pub async fn run_collect<C: Collector>(
     batch_interval: Interval,
     vdaf: C,
     aggregation_parameter: &C::AggregationParam,
+    aggregate_share_length: usize,
 ) -> Result<C::AggregateResult, Error> {
     let http_client = Client::builder().user_agent(COLLECTOR_USER_AGENT).build()?;
 
@@ -178,7 +175,7 @@ pub async fn run_collect<C: Collector>(
     )?;
 
     let leader_share = C::AggregateShare::get_decoded(
-        &(),
+        &aggregate_share_length,
         &leader_recipient.open(leader_ciphertext, &batch_interval.associated_data())?,
     )?;
 
@@ -193,7 +190,7 @@ pub async fn run_collect<C: Collector>(
     )?;
 
     let helper_share = C::AggregateShare::get_decoded(
-        &(),
+        &aggregate_share_length,
         &helper_recipient.open(helper_ciphertext, &batch_interval.associated_data())?,
     )?;
 

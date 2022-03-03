@@ -15,7 +15,7 @@ use color_eyre::eyre::Result;
 use http::{Response, StatusCode};
 use prio::{
     codec::{Decode, Encode},
-    vdaf::{self, PrepareStep, VdafError},
+    vdaf::{self, PrepareTransition, VdafError},
 };
 use std::{
     collections::HashMap,
@@ -47,6 +47,8 @@ pub enum Error {
     Aggregation(#[from] crate::aggregate::Error),
     #[error("aggregate protocol error {0}")]
     AggregateProtocol(String),
+    #[error("Codec error")]
+    Codec(#[from] prio::codec::CodecError),
 }
 
 impl IntoHttpApiProblem for Error {
@@ -234,39 +236,37 @@ impl<A: vdaf::Aggregator + Debug> Helper<A> {
                         A::PrepareMessage::get_decoded(step, payload)?;
 
                     // Advance self to round n + 1
-                    let transition = if step.is_last_round() {
-                        info!(?leader_transition.nonce, "verifying proof");
-                        match self.aggregator.prepare_finish(
-                            leader_transition.nonce,
-                            step.clone(),
-                            preprocessed_prepare_message,
-                        )? {
-                            Some(output_share) => {
-                                info!("proof ok");
-                                *stored_report = StoredReport::Accumulated;
-                                info!(?leader_transition.nonce, "accumulating report");
-                                self.aggregator
-                                    .accumulate_report(leader_transition.nonce, output_share)?;
-                                Transition::Finished
-                            }
-                            None => {
-                                info!("proof invalid");
-                                // Proof was invalid
-                                Transition::Failed {
-                                    error: TransitionError::VdafPrepError,
-                                }
+                    let transition = match self
+                        .aggregator
+                        .aggregator
+                        .prepare_step(step.clone(), Some(preprocessed_prepare_message))
+                    {
+                        PrepareTransition::Continue(
+                            next_round_step,
+                            next_round_prepare_message,
+                        ) => {
+                            *stored_report = StoredReport::Waiting {
+                                step: next_round_step,
+                            };
+                            Transition::Continued {
+                                payload: next_round_prepare_message.get_encoded(),
                             }
                         }
-                    } else {
-                        let (next_round_step, next_round_prepare_message) = self
-                            .aggregator
-                            .aggregator
-                            .prepare_next(step.clone(), preprocessed_prepare_message)?;
-                        *stored_report = StoredReport::Waiting {
-                            step: next_round_step,
-                        };
-                        Transition::Continued {
-                            payload: next_round_prepare_message.get_encoded(),
+                        PrepareTransition::Finish(output_share) => {
+                            *stored_report = StoredReport::Accumulated;
+                            info!(?leader_transition.nonce, "accumulating report");
+                            self.aggregator
+                                .accumulate_report(leader_transition.nonce, output_share)?;
+                            Transition::Finished
+                        }
+                        PrepareTransition::Fail(error) => {
+                            warn!(
+                                time = ?leader_transition.nonce,
+                                ?error,
+                                "proof did not check out for report"
+                            );
+                            // Process other transitions
+                            continue;
                         }
                     };
 

@@ -7,7 +7,7 @@ use crate::{
     Nonce,
 };
 use num_enum::{IntoPrimitive, TryFromPrimitive};
-use prio::codec::{decode_items_u16, encode_items_u16, Decode, Encode};
+use prio::codec::{decode_u16_items, encode_u16_items, CodecError, Decode, Encode};
 use std::{convert::TryFrom, io::Cursor};
 
 #[derive(Debug, thiserror::Error)]
@@ -41,13 +41,11 @@ pub struct Report {
 }
 
 impl Decode<()> for Report {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let task_id = TaskId::decode(&(), bytes)?;
         let timestamp = Nonce::decode(&(), bytes)?;
-        let extensions = decode_items_u16(&(), bytes)?;
-        let encrypted_input_shares = decode_items_u16(&(), bytes)?;
+        let extensions = decode_u16_items(&(), bytes)?;
+        let encrypted_input_shares = decode_u16_items(&(), bytes)?;
 
         Ok(Self {
             task_id,
@@ -62,8 +60,8 @@ impl Encode for Report {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.task_id.encode(bytes);
         self.nonce.encode(bytes);
-        encode_items_u16(bytes, &self.extensions);
-        encode_items_u16(bytes, &self.encrypted_input_shares);
+        encode_u16_items(bytes, &self.extensions);
+        encode_u16_items(bytes, &self.encrypted_input_shares);
     }
 }
 
@@ -71,7 +69,7 @@ impl Report {
     pub fn associated_data(timestamp: Nonce, extensions: &[Extension]) -> Vec<u8> {
         let mut associated_data = vec![];
         timestamp.encode(&mut associated_data);
-        encode_items_u16(&mut associated_data, extensions);
+        encode_u16_items(&mut associated_data, extensions);
 
         associated_data
     }
@@ -87,12 +85,10 @@ pub struct Extension {
 }
 
 impl Decode<()> for Extension {
-    type Error = Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let extension_type = ExtensionType::try_from(u16::decode(&(), bytes)?)
-            .map_err(|e| Error::Primitive(e.to_string()))?;
-        let extension_data = decode_items_u16(&(), bytes)?;
+            .map_err(|e| CodecError::Other(Box::new(e)))?;
+        let extension_data = decode_u16_items(&(), bytes)?;
 
         Ok(Self {
             extension_type,
@@ -104,7 +100,7 @@ impl Decode<()> for Extension {
 impl Encode for Extension {
     fn encode(&self, bytes: &mut Vec<u8>) {
         u16::from(self.extension_type).encode(bytes);
-        encode_items_u16(bytes, &self.extension_data);
+        encode_u16_items(bytes, &self.extension_data);
     }
 }
 

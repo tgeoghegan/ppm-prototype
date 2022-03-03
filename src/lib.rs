@@ -11,7 +11,7 @@ pub mod trace;
 
 use chrono::{DurationRound, TimeZone, Utc};
 use directories::ProjectDirs;
-use prio::codec::{Decode, Encode};
+use prio::codec::{CodecError, Decode, Encode};
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 use std::{
@@ -65,9 +65,7 @@ impl Encode for Time {
 }
 
 impl Decode<()> for Time {
-    type Error = std::io::Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         Ok(Self(u64::decode(&(), bytes)?))
     }
 }
@@ -95,9 +93,7 @@ impl Encode for Duration {
 }
 
 impl Decode<()> for Duration {
-    type Error = std::io::Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         Ok(Self(u64::decode(&(), bytes)?))
     }
 }
@@ -129,9 +125,7 @@ impl Encode for Nonce {
 }
 
 impl Decode<()> for Nonce {
-    type Error = std::io::Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let time = Time::decode(&(), bytes)?;
         let rand = u64::decode(&(), bytes)?;
 
@@ -175,9 +169,7 @@ impl Encode for Interval {
 }
 
 impl Decode<()> for Interval {
-    type Error = std::io::Error;
-
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, Self::Error> {
+    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let start = Time::decode(&(), bytes)?;
         let duration = Duration::decode(&(), bytes)?;
 
