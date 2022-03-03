@@ -1,0 +1,44 @@
+FROM rust:1.58.1-alpine as builder
+
+RUN apk add libc-dev && apk update
+
+# Attempt to install a nonexistent package. This triggers
+# updating the crates.io index separately from building the
+# dependencies, so if dependencies change we don't have to
+# re-download the whole index.
+RUN cargo install _update_crates_io_failure_is_expected_ ; true
+
+WORKDIR /usr/src/ppm-prototype
+
+# First, copy just the Cargo.toml and a dummy main, then build them.
+# This primes a layer that contains the built dependencies.
+COPY Cargo.lock Cargo.lock
+COPY Cargo.toml Cargo.toml
+RUN sed -i /build.rs/d Cargo.toml
+RUN mkdir -p src
+RUN echo "fn main() {println!(\"if you see this, the build broke\")}" > src/main.rs
+# This cargo build command must match the one below, or the build cache will not be reused.
+RUN cargo build
+
+# Clean up and copy the real source.
+# After this we have a layer that should be cacheable so long as the dependencies don't change.
+RUN rm -f target/*/deps/ppm_prototype* src/main.rs
+
+COPY . .
+
+ARG BUILD_INFO=unspecified
+
+# This cargo build command must match the one above, or the build cache will not be reused.
+RUN cargo build --bin helper
+
+# Build a minimal container from Alpine containing only the stripped binary and
+# no intermediate build artifacts
+FROM alpine:3.15.0
+
+RUN apk add libgcc && apk update
+
+COPY --from=builder /usr/src/ppm-prototype/target/debug/helper /helper
+COPY --from=builder /usr/src/ppm-prototype/sample-config/hpke.json /root/.config/ppm-prototype/hpke.json
+COPY --from=builder /usr/src/ppm-prototype/sample-config/parameters.json /root/.config/ppm-prototype/parameters.json
+
+CMD ["/helper"]
