@@ -454,7 +454,7 @@ impl<A: VdafAggregator + Debug> Leader<A> {
     }
 }
 
-#[tracing::instrument(err)]
+#[tracing::instrument(skip(ppm_parameters, vdaf_aggregator, verify_parameter, aggregation_parameter, hpke_config), err)]
 pub async fn run_leader<A>(
     ppm_parameters: &Parameters,
     vdaf_aggregator: &A,
