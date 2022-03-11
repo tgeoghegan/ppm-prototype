@@ -64,9 +64,9 @@ impl Encode for Time {
     }
 }
 
-impl Decode<()> for Time {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        Ok(Self(u64::decode(&(), bytes)?))
+impl Decode for Time {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        Ok(Self(u64::decode(bytes)?))
     }
 }
 
@@ -92,9 +92,9 @@ impl Encode for Duration {
     }
 }
 
-impl Decode<()> for Duration {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        Ok(Self(u64::decode(&(), bytes)?))
+impl Decode for Duration {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        Ok(Self(u64::decode(bytes)?))
     }
 }
 
@@ -124,10 +124,10 @@ impl Encode for Nonce {
     }
 }
 
-impl Decode<()> for Nonce {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let time = Time::decode(&(), bytes)?;
-        let rand = u64::decode(&(), bytes)?;
+impl Decode for Nonce {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let time = Time::decode(bytes)?;
+        let rand = u64::decode(bytes)?;
 
         Ok(Self { time, rand })
     }
@@ -168,10 +168,10 @@ impl Encode for Interval {
     }
 }
 
-impl Decode<()> for Interval {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let start = Time::decode(&(), bytes)?;
-        let duration = Duration::decode(&(), bytes)?;
+impl Decode for Interval {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let start = Time::decode(bytes)?;
+        let duration = Duration::decode(bytes)?;
 
         Ok(Self { start, duration })
     }

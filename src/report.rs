@@ -40,10 +40,10 @@ pub struct Report {
     pub encrypted_input_shares: Vec<hpke::Ciphertext>,
 }
 
-impl Decode<()> for Report {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let task_id = TaskId::decode(&(), bytes)?;
-        let timestamp = Nonce::decode(&(), bytes)?;
+impl Decode for Report {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let task_id = TaskId::decode(bytes)?;
+        let timestamp = Nonce::decode(bytes)?;
         let extensions = decode_u16_items(&(), bytes)?;
         let encrypted_input_shares = decode_u16_items(&(), bytes)?;
 
@@ -60,8 +60,8 @@ impl Encode for Report {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.task_id.encode(bytes);
         self.nonce.encode(bytes);
-        encode_u16_items(bytes, &self.extensions);
-        encode_u16_items(bytes, &self.encrypted_input_shares);
+        encode_u16_items(bytes, &(), &self.extensions);
+        encode_u16_items(bytes, &(), &self.encrypted_input_shares);
     }
 }
 
@@ -69,7 +69,7 @@ impl Report {
     pub fn associated_data(timestamp: Nonce, extensions: &[Extension]) -> Vec<u8> {
         let mut associated_data = vec![];
         timestamp.encode(&mut associated_data);
-        encode_u16_items(&mut associated_data, extensions);
+        encode_u16_items(&mut associated_data, &(), extensions);
 
         associated_data
     }
@@ -84,9 +84,9 @@ pub struct Extension {
     extension_data: Vec<u8>,
 }
 
-impl Decode<()> for Extension {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let extension_type = ExtensionType::try_from(u16::decode(&(), bytes)?)
+impl Decode for Extension {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let extension_type = ExtensionType::try_from(u16::decode(bytes)?)
             .map_err(|e| CodecError::Other(Box::new(e)))?;
         let extension_data = decode_u16_items(&(), bytes)?;
 
@@ -100,7 +100,7 @@ impl Decode<()> for Extension {
 impl Encode for Extension {
     fn encode(&self, bytes: &mut Vec<u8>) {
         u16::from(self.extension_type).encode(bytes);
-        encode_u16_items(bytes, &self.extension_data);
+        encode_u16_items(bytes, &(), &self.extension_data);
     }
 }
 

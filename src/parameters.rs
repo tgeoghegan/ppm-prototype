@@ -110,10 +110,7 @@ impl Parameters {
             .bytes()
             .await?;
 
-        Ok(hpke::Config::decode(
-            &(),
-            &mut Cursor::new(body_bytes.as_ref()),
-        )?)
+        Ok(hpke::Config::decode(&mut Cursor::new(body_bytes.as_ref()))?)
     }
 
     pub fn upload_endpoint(&self) -> Result<Url, Error> {
@@ -185,8 +182,8 @@ impl Encode for TaskId {
     }
 }
 
-impl Decode<()> for TaskId {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+impl Decode for TaskId {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let mut decoded = [0u8; 32];
         bytes.read_exact(&mut decoded)?;
         Ok(Self(decoded))

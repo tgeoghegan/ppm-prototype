@@ -9,9 +9,8 @@ use crate::{
 };
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use prio::{
-    codec::{decode_u16_items, encode_u16_items, CodecError, Decode, Encode},
-    pcp::Type,
-    vdaf::{self, prio3::Prio3VerifyParam, suite::Key, Aggregatable, PrepareTransition},
+    codec::{decode_u16_items, encode_u16_items, CodecError, Decode, Encode, ParameterizedDecode},
+    vdaf::{self, Aggregatable, PrepareTransition},
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -97,16 +96,16 @@ pub struct ReportShare {
 impl Encode for ReportShare {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.nonce.encode(bytes);
-        encode_u16_items(bytes, &self.extensions);
+        encode_u16_items(bytes, &(), &self.extensions);
         self.encrypted_input_share.encode(bytes);
     }
 }
 
-impl Decode<()> for ReportShare {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let nonce = Nonce::decode(&(), bytes)?;
+impl Decode for ReportShare {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let nonce = Nonce::decode(bytes)?;
         let extensions = decode_u16_items(&(), bytes)?;
-        let encrypted_input_share = hpke::Ciphertext::decode(&(), bytes)?;
+        let encrypted_input_share = hpke::Ciphertext::decode(bytes)?;
 
         Ok(Self {
             nonce,
@@ -132,7 +131,7 @@ impl Encode for Transition {
         match self {
             Self::Continued { payload } => {
                 0u8.encode(bytes);
-                encode_u16_items(bytes, payload);
+                encode_u16_items(bytes, &(), payload);
             }
             Self::Finished => 1u8.encode(bytes),
             Self::Failed { error } => {
@@ -143,16 +142,16 @@ impl Encode for Transition {
     }
 }
 
-impl Decode<()> for Transition {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let discriminant = u8::decode(&(), bytes)?;
+impl Decode for Transition {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let discriminant = u8::decode(bytes)?;
         let value = match discriminant {
             0u8 => Self::Continued {
                 payload: decode_u16_items(&(), bytes)?,
             },
             1u8 => Self::Finished,
             2u8 => Self::Failed {
-                error: TransitionError::try_from(u8::decode(&(), bytes)?)
+                error: TransitionError::try_from(u8::decode(bytes)?)
                     .map_err(|e| CodecError::Other(Box::new(e)))?,
             },
             d => {
@@ -197,10 +196,10 @@ impl Encode for TransitionMessage {
     }
 }
 
-impl Decode<()> for TransitionMessage {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let nonce = Nonce::decode(&(), bytes)?;
-        let transition = Transition::decode(&(), bytes)?;
+impl Decode for TransitionMessage {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let nonce = Nonce::decode(bytes)?;
+        let transition = Transition::decode(bytes)?;
 
         Ok(Self { nonce, transition })
     }
@@ -246,15 +245,15 @@ impl Encode for Aggregate {
     }
 }
 
-impl Decode<()> for Aggregate {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let discriminant = u8::decode(&(), bytes)?;
+impl Decode for Aggregate {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let discriminant = u8::decode(bytes)?;
         let value = match discriminant {
-            0u8 => Self::Initialize(AggregateInitReq::decode(&(), bytes)?),
-            1u8 => Self::Request(AggregateReq::decode(&(), bytes)?),
-            2u8 => Self::Response(AggregateResp::decode(&(), bytes)?),
-            3u8 => Self::ShareRequest(AggregateShareReq::decode(&(), bytes)?),
-            4u8 => Self::ShareResponse(hpke::Ciphertext::decode(&(), bytes)?),
+            0u8 => Self::Initialize(AggregateInitReq::decode(bytes)?),
+            1u8 => Self::Request(AggregateReq::decode(bytes)?),
+            2u8 => Self::Response(AggregateResp::decode(bytes)?),
+            3u8 => Self::ShareRequest(AggregateShareReq::decode(bytes)?),
+            4u8 => Self::ShareResponse(hpke::Ciphertext::decode(bytes)?),
             d => {
                 return Err(CodecError::Other(Box::new(Error::Codec(format!(
                     "unexpected Aggregate discriminant {}",
@@ -278,14 +277,14 @@ pub struct AggregateInitReq {
 impl Encode for AggregateInitReq {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.task_id.encode(bytes);
-        encode_u16_items(bytes, &self.aggregation_parameter);
-        encode_u16_items(bytes, &self.report_shares);
+        encode_u16_items(bytes, &(), &self.aggregation_parameter);
+        encode_u16_items(bytes, &(), &self.report_shares);
     }
 }
 
-impl Decode<()> for AggregateInitReq {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let task_id = TaskId::decode(&(), bytes)?;
+impl Decode for AggregateInitReq {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let task_id = TaskId::decode(bytes)?;
         let aggregation_parameter = decode_u16_items(&(), bytes)?;
         let report_shares = decode_u16_items(&(), bytes)?;
 
@@ -308,14 +307,14 @@ pub struct AggregateReq {
 impl Encode for AggregateReq {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.task_id.encode(bytes);
-        encode_u16_items(bytes, &self.helper_state);
-        encode_u16_items(bytes, &self.transitions);
+        encode_u16_items(bytes, &(), &self.helper_state);
+        encode_u16_items(bytes, &(), &self.transitions);
     }
 }
 
-impl Decode<()> for AggregateReq {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let task_id = TaskId::decode(&(), bytes)?;
+impl Decode for AggregateReq {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let task_id = TaskId::decode(bytes)?;
         let helper_state = decode_u16_items(&(), bytes)?;
         let transitions = decode_u16_items(&(), bytes)?;
 
@@ -336,13 +335,13 @@ pub struct AggregateResp {
 
 impl Encode for AggregateResp {
     fn encode(&self, bytes: &mut Vec<u8>) {
-        encode_u16_items(bytes, &self.helper_state);
-        encode_u16_items(bytes, &self.transitions);
+        encode_u16_items(bytes, &(), &self.helper_state);
+        encode_u16_items(bytes, &(), &self.transitions);
     }
 }
 
-impl Decode<()> for AggregateResp {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+impl Decode for AggregateResp {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
         let helper_state = decode_u16_items(&(), bytes)?;
         let transitions = decode_u16_items(&(), bytes)?;
 
@@ -367,10 +366,10 @@ impl Encode for AggregateShareReq {
     }
 }
 
-impl Decode<()> for AggregateShareReq {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let task_id = TaskId::decode(&(), bytes)?;
-        let batch_interval = Interval::decode(&(), bytes)?;
+impl Decode for AggregateShareReq {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let task_id = TaskId::decode(bytes)?;
+        let batch_interval = Interval::decode(bytes)?;
 
         Ok(Self {
             task_id,
@@ -395,9 +394,9 @@ impl Encode for AggregateMessage {
     }
 }
 
-impl Decode<()> for AggregateMessage {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let aggregate = Aggregate::decode(&(), bytes)?;
+impl Decode for AggregateMessage {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let aggregate = Aggregate::decode(bytes)?;
         let mut tag = [0u8; 32];
         bytes.read_exact(&mut tag)?;
 
@@ -425,32 +424,6 @@ pub(crate) fn dump_accumulators<S: Debug>(accumulators: &HashMap<Interval, Accum
         info!(?interval, ?accumulated, "accumulated value for interval");
     }
 }
-
-/// This trait is implemented on the `VerifyParam` associated type on
-/// `prio::vdaf::Vdaf` implementations so that we can generically get fake
-/// verification randomness in anticipation of working out how aggregators will
-/// negotiate it.
-pub trait DefaultVerifyParam {
-    fn default<T: Type>(role: Role, typ: &T) -> Self;
-}
-
-impl DefaultVerifyParam for Prio3VerifyParam {
-    fn default<T: Type>(role: Role, typ: &T) -> Self {
-        Self {
-            query_rand_init: Key::Blake3([1; 32]),
-            aggregator_id: role.index() as u8,
-            input_len: typ.input_len(),
-            proof_len: typ.proof_len(),
-            joint_rand_len: typ.joint_rand_len(),
-        }
-    }
-}
-
-// impl DefaultVerifyParam for Poplar1VerifyParam {
-//     fn default(role: Role) -> Self {
-//         Self::new(&Key::Blake3([1; 32]), role == Role::Leader)
-//     }
-// }
 
 #[derive(Clone, Debug)]
 pub(crate) struct Aggregator<A: vdaf::Aggregator> {
@@ -527,7 +500,8 @@ impl<A: vdaf::Aggregator> Aggregator<A> {
         let plaintext =
             hpke_recipient.open(report_share, &Report::associated_data(nonce, extensions))?;
         info!(plaintext_len = ?plaintext.len(), "decoding input share");
-        let input_share = A::InputShare::get_decoded(&self.verify_parameter, &plaintext)?;
+        let input_share =
+            A::InputShare::get_decoded_with_param(&self.verify_parameter, &plaintext)?;
         info!("decoded input share");
 
         let step = self.aggregator.prepare_init(

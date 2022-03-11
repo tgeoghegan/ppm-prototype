@@ -2,7 +2,7 @@ use color_eyre::eyre::Result;
 use ppm_prototype::{
     collect::run_collect, hpke, parameters::Parameters, trace, Duration, Interval, Role, Time,
 };
-use prio::vdaf::{prio3::Prio3Sum64, suite::Suite};
+use prio::vdaf::prio3::Prio3Aes128Sum;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -12,7 +12,7 @@ async fn main() -> Result<()> {
 
     let ppm_parameters = Parameters::from_config_file()?;
     let hpke_config = hpke::Config::from_config_file(Role::Collector)?;
-    let vdaf = Prio3Sum64::new(Suite::Blake3, 2, 63).unwrap();
+    let vdaf = Prio3Aes128Sum::new(2, 63).unwrap();
     let aggregate_share_length = vdaf.output_len();
 
     let sum = run_collect(

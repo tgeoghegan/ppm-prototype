@@ -20,8 +20,6 @@ pub enum Error {
     Parameters(#[from] crate::parameters::Error),
     #[error("VDAF error")]
     Vdaf(#[from] prio::vdaf::VdafError),
-    #[error("Suite error")]
-    Suite(#[from] prio::vdaf::suite::SuiteError),
     #[error("JSON error")]
     Json(#[from] serde_json::Error),
     #[error("Unspecified error: {0}")]

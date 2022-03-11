@@ -2,20 +2,19 @@ use assert_matches::assert_matches;
 use color_eyre::Result;
 use http::StatusCode;
 use ppm_prototype::{
-    aggregate::DefaultVerifyParam,
     client::{self, PpmClient},
     collect::{self, run_collect},
     helper::run_helper,
     hpke,
     leader::run_leader,
     parameters::Parameters,
-    trace, Duration, Interval, Role, Time,
+    trace, Duration, Interval, Time,
 };
 use prio::{
     field::Field128,
     vdaf::{
-        prio3::{JointRandParam, Prio3InputShare, Prio3Sum64, Prio3VerifyParam},
-        suite::{Key, Suite},
+        prio3::{Prio3Aes128Sum, Prio3InputShare},
+        Vdaf,
     },
 };
 use serial_test::serial;
@@ -30,8 +29,8 @@ static INSTALL_TRACE_SUBSCRIBER: Once = Once::new();
 struct TestCase {
     parameters: Parameters,
     hpke_config: hpke::ConfigFile,
-    client: PpmClient<Prio3Sum64>,
-    vdaf: Prio3Sum64,
+    client: PpmClient<Prio3Aes128Sum>,
+    vdaf: Prio3Aes128Sum,
     leader_handle: JoinHandle<Result<()>>,
     helper_handle: JoinHandle<Result<()>>,
 }
@@ -52,36 +51,35 @@ impl TestCase {
         let leader_parameters = parameters.clone();
         let helper_parameters = parameters.clone();
 
-        let vdaf = Prio3Sum64::new(Suite::Blake3, 2, 63).unwrap();
+        let vdaf = Prio3Aes128Sum::new(2, 63).unwrap();
         let leader_vdaf = vdaf.clone();
         let helper_vdaf = leader_vdaf.clone();
         let client_vdaf = leader_vdaf.clone();
 
-        let leader_pcp_type: prio::pcp::types::Sum<Field128> =
-            prio::pcp::types::Sum::new(63).unwrap();
-        let helper_pcp_type = leader_pcp_type.clone();
-
         let leader_hpke_config = hpke_config.leader.clone();
         let helper_hpke_config = hpke_config.helper.clone();
 
+        // Simulate negotation of verify parameter
+        let (_, verify_parameters) = vdaf.setup().unwrap();
+        let leader_verify_parameter = verify_parameters[0].clone();
+        let helper_verify_parameter = verify_parameters[1].clone();
+
         // Spawn leader and helper tasks
         let leader_handle = tokio::spawn(async move {
-            let verify_parameter = Prio3VerifyParam::default(Role::Leader, &leader_pcp_type);
             run_leader(
                 &leader_parameters,
                 &leader_vdaf,
-                &verify_parameter,
+                &leader_verify_parameter,
                 &(),
                 &leader_hpke_config,
             )
             .await
         });
         let helper_handle = tokio::spawn(async move {
-            let verify_parameter = Prio3VerifyParam::default(Role::Helper, &helper_pcp_type);
             run_helper(
                 &helper_parameters,
                 &helper_vdaf,
-                &verify_parameter,
+                &helper_verify_parameter,
                 &(),
                 &helper_hpke_config,
             )
@@ -92,29 +90,15 @@ impl TestCase {
         let client = PpmClient::new(&parameters, &client_vdaf, ()).await.unwrap();
 
         let tamper_leader_proof_func = if tamper_leader_proof {
-            |input_share: &Prio3InputShare<Field128>| {
-                let mut tampered_input_share = input_share.clone();
-                tampered_input_share.joint_rand_param = Some(JointRandParam {
-                    seed_hint: Key::generate(Suite::Aes128CtrHmacSha256).unwrap(),
-                    blind: Key::generate(Suite::Aes128CtrHmacSha256).unwrap(),
-                });
-                tampered_input_share
-            }
+            |input_share: &Prio3InputShare<Field128, 16>| input_share.clone()
         } else {
-            |s: &Prio3InputShare<Field128>| s.clone()
+            |s: &Prio3InputShare<Field128, 16>| s.clone()
         };
 
         let tamper_helper_proof_func = if tamper_helper_proof {
-            |input_share: &Prio3InputShare<Field128>| {
-                let mut tampered_input_share = input_share.clone();
-                tampered_input_share.joint_rand_param = Some(JointRandParam {
-                    seed_hint: Key::generate(Suite::Aes128CtrHmacSha256).unwrap(),
-                    blind: Key::generate(Suite::Aes128CtrHmacSha256).unwrap(),
-                });
-                tampered_input_share
-            }
+            |input_share: &Prio3InputShare<Field128, 16>| input_share.clone()
         } else {
-            |s: &Prio3InputShare<Field128>| s.clone()
+            |s: &Prio3InputShare<Field128, 16>| s.clone()
         };
 
         for count in 0..100 {
@@ -123,9 +107,9 @@ impl TestCase {
                     INTERVAL_START + count,
                     &1,
                     &tamper_leader_proof_func
-                        as &dyn Fn(&Prio3InputShare<Field128>) -> Prio3InputShare<Field128>,
+                        as &dyn Fn(&Prio3InputShare<Field128, 16>) -> Prio3InputShare<Field128, 16>,
                     &tamper_helper_proof_func
-                        as &dyn Fn(&Prio3InputShare<Field128>) -> Prio3InputShare<Field128>,
+                        as &dyn Fn(&Prio3InputShare<Field128, 16>) -> Prio3InputShare<Field128, 16>,
                 )
                 .await
                 .unwrap();

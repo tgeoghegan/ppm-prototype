@@ -92,9 +92,9 @@ pub struct Ciphertext {
     pub payload: Vec<u8>,
 }
 
-impl Decode<()> for Ciphertext {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let config_id = ConfigId(u8::decode(&(), bytes)?);
+impl Decode for Ciphertext {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let config_id = ConfigId(u8::decode(bytes)?);
         let encapsulated_context = decode_u16_items(&(), bytes)?;
         let payload = decode_u16_items(&(), bytes)?;
 
@@ -109,8 +109,8 @@ impl Decode<()> for Ciphertext {
 impl Encode for Ciphertext {
     fn encode(&self, bytes: &mut Vec<u8>) {
         self.config_id.0.encode(bytes);
-        encode_u16_items(bytes, &self.encapsulated_context);
-        encode_u16_items(bytes, &self.payload);
+        encode_u16_items(bytes, &(), &self.encapsulated_context);
+        encode_u16_items(bytes, &(), &self.payload);
     }
 }
 
@@ -352,18 +352,18 @@ impl Config {
     }
 }
 
-impl Decode<()> for Config {
-    fn decode(_decoding_parameter: &(), bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
-        let id = ConfigId(u8::decode(&(), bytes)?);
+impl Decode for Config {
+    fn decode(bytes: &mut Cursor<&[u8]>) -> Result<Self, CodecError> {
+        let id = ConfigId(u8::decode(bytes)?);
         // It's a bit unpleasant reducing the error from try_from() to a string
         // but since TryFromPrimitiveError is generic over the enum, it would
         // contaminate this module's error enum with a generic parameter, which
         // is a big hassle.
-        let kem_id = KeyEncapsulationMechanism::try_from(u16::decode(&(), bytes)?)
+        let kem_id = KeyEncapsulationMechanism::try_from(u16::decode(bytes)?)
             .map_err(|e| CodecError::Other(Box::new(e)))?;
-        let kdf_id = KeyDerivationFunction::try_from(u16::decode(&(), bytes)?)
+        let kdf_id = KeyDerivationFunction::try_from(u16::decode(bytes)?)
             .map_err(|e| CodecError::Other(Box::new(e)))?;
-        let aead_id = AuthenticatedEncryptionWithAssociatedData::try_from(u16::decode(&(), bytes)?)
+        let aead_id = AuthenticatedEncryptionWithAssociatedData::try_from(u16::decode(bytes)?)
             .map_err(|e| CodecError::Other(Box::new(e)))?;
         let public_key = PublicKey(decode_u16_items(&(), bytes)?);
 
@@ -385,7 +385,7 @@ impl Encode for Config {
         u16::from(self.kem_id).encode(bytes);
         u16::from(self.kdf_id).encode(bytes);
         u16::from(self.aead_id).encode(bytes);
-        encode_u16_items(bytes, &self.public_key.0);
+        encode_u16_items(bytes, &(), &self.public_key.0);
     }
 }
 

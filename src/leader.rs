@@ -16,7 +16,7 @@ use color_eyre::eyre::Result;
 use http::{Response, StatusCode};
 use http_api_problem::HttpApiProblem;
 use prio::{
-    codec::{Decode, Encode},
+    codec::{Decode, Encode, ParameterizedDecode},
     vdaf::{self, Aggregator as VdafAggregator, PrepareTransition, VdafError},
 };
 use reqwest::Client;
@@ -227,7 +227,7 @@ impl<A: VdafAggregator + Debug> Leader<A> {
             };
         }
 
-        let aggregate_response = AggregateMessage::get_decoded(&(), &http_response.bytes().await?)?;
+        let aggregate_response = AggregateMessage::get_decoded(&http_response.bytes().await?)?;
 
         self.aggregator.dump_accumulators();
 
@@ -254,7 +254,7 @@ impl<A: VdafAggregator + Debug> Leader<A> {
             };
         }
 
-        let aggregate_response = AggregateMessage::get_decoded(&(), &http_response.bytes().await?)?;
+        let aggregate_response = AggregateMessage::get_decoded(&http_response.bytes().await?)?;
 
         self.handle_aggregate_resp(aggregate_response).await
     }
@@ -311,7 +311,8 @@ impl<A: VdafAggregator + Debug> Leader<A> {
                     };
                     // Join helper and leader prepare message shares into prepare message for round
                     // n
-                    let helper_prepare_message = A::PrepareMessage::get_decoded(state, &payload)?;
+                    let helper_prepare_message =
+                        A::PrepareMessage::get_decoded_with_param(state, &payload)?;
                     let prepare_message = self.aggregator.aggregator.prepare_preprocess([
                         helper_prepare_message,
                         leader_prepare_message.clone(),
@@ -438,7 +439,7 @@ impl<A: VdafAggregator + Debug> Leader<A> {
             };
         }
 
-        let aggregate_response = AggregateMessage::get_decoded(&(), &http_response.bytes().await?)?;
+        let aggregate_response = AggregateMessage::get_decoded(&http_response.bytes().await?)?;
 
         // Ship encrypted aggregate shares to collector
         match aggregate_response.aggregate {
@@ -454,7 +455,16 @@ impl<A: VdafAggregator + Debug> Leader<A> {
     }
 }
 
-#[tracing::instrument(skip(ppm_parameters, vdaf_aggregator, verify_parameter, aggregation_parameter, hpke_config), err)]
+#[tracing::instrument(
+    skip(
+        ppm_parameters,
+        vdaf_aggregator,
+        verify_parameter,
+        aggregation_parameter,
+        hpke_config
+    ),
+    err
+)]
 pub async fn run_leader<A>(
     ppm_parameters: &Parameters,
     vdaf_aggregator: &A,
@@ -491,7 +501,7 @@ where
         .and_then(|body: Bytes, leader: Arc<Mutex<Leader<_>>>| async move {
             let mut leader = leader.lock().await;
 
-            let report = Report::get_decoded(&(), &body).map_err(|e| {
+            let report = Report::get_decoded(&body).map_err(|e| {
                 warp::reject::custom(e.problem_document(Some(&leader.parameters), "upload"))
             })?;
 
@@ -534,7 +544,7 @@ where
         .and_then(|body: Bytes, leader: Arc<Mutex<Leader<_>>>| async move {
             let mut leader = leader.lock().await;
 
-            let collect_request = CollectRequest::get_decoded(&(), &body).map_err(|e| {
+            let collect_request = CollectRequest::get_decoded(&body).map_err(|e| {
                 warp::reject::custom(e.problem_document(Some(&leader.parameters), "collect"))
             })?;
 

@@ -14,7 +14,7 @@ use bytes::Bytes;
 use color_eyre::eyre::Result;
 use http::{Response, StatusCode};
 use prio::{
-    codec::{Decode, Encode},
+    codec::{Decode, Encode, ParameterizedDecode},
     vdaf::{self, PrepareTransition, VdafError},
 };
 use std::{
@@ -233,7 +233,7 @@ impl<A: vdaf::Aggregator + Debug> Helper<A> {
                     };
 
                     let preprocessed_prepare_message =
-                        A::PrepareMessage::get_decoded(step, payload)?;
+                        A::PrepareMessage::get_decoded_with_param(step, payload)?;
 
                     // Advance self to round n + 1
                     let transition = match self
@@ -361,7 +361,7 @@ where
         .and(with_shared_value(helper_aggregator.clone()))
         .and_then(|body: Bytes, helper: Arc<Mutex<Helper<_>>>| async move {
             let mut helper = helper.lock().await;
-            let aggregate_message = AggregateMessage::get_decoded(&(), &body).map_err(|e| {
+            let aggregate_message = AggregateMessage::get_decoded(&body).map_err(|e| {
                 warp::reject::custom(e.problem_document(Some(&helper.parameters), "aggregate"))
             })?;
 
@@ -386,7 +386,7 @@ where
         .and(with_shared_value(helper_aggregator.clone()))
         .and_then(|body: Bytes, helper: Arc<Mutex<Helper<_>>>| async move {
             let mut helper = helper.lock().await;
-            let aggregate_message = AggregateMessage::get_decoded(&(), &body).map_err(|e| {
+            let aggregate_message = AggregateMessage::get_decoded(&body).map_err(|e| {
                 warp::reject::custom(
                     e.problem_document(Some(&helper.parameters), "aggregate_share"),
                 )
