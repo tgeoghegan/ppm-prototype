@@ -12,5 +12,9 @@ async fn main() -> Result<()> {
         hpke::Config::from_config_file(Role::Leader).wrap_err("loading hpke config")?;
     let vdaf = Prio3Aes128Sum::new(2, 63).unwrap();
 
-    run_leader(&ppm_parameters, &vdaf, todo!(), &(), &hpke_config).await
+    let verify_param = ppm_parameters
+        .decode_vdaf_verification_parameter(Role::Leader, &vdaf)
+        .wrap_err("decoding VDAF verification parameter")?;
+
+    run_leader(&ppm_parameters, &vdaf, &verify_param, &(), &hpke_config).await
 }

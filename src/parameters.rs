@@ -4,7 +4,10 @@
 //! and related types.
 
 use crate::{config_path, hpke, Duration, Interval, Role};
-use prio::codec::{CodecError, Decode, Encode};
+use prio::{
+    codec::{CodecError, Decode, Encode, ParameterizedDecode},
+    vdaf::Vdaf,
+};
 use rand::{thread_rng, Rng};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -62,12 +65,13 @@ pub struct Parameters {
     pub aggregator_auth_key: Vec<u8>,
     /// What VDAF are we running
     pub vdaf: VdafLabel,
-    /// VDAF verification parameter as an opaque byte string
+    // Encoded verification parameter for the VDAF, negotiated out of band
+    // before the start of the protocol
     #[serde(
-        serialize_with = "crate::base64::serialize_bytes",
-        deserialize_with = "crate::base64::deserialize_bytes"
+        serialize_with = "crate::base64::serialize_bytes_vec",
+        deserialize_with = "crate::base64::deserialize_bytes_vec"
     )]
-    pub vdaf_verification_parameter: Vec<u8>,
+    pub vdaf_verification_parameter: Vec<Vec<u8>>,
 }
 
 impl Parameters {
@@ -141,6 +145,22 @@ impl Parameters {
         batch_interval.duration.0 >= self.min_batch_duration.0
             && batch_interval.start.interval_start(self.min_batch_duration) == batch_interval.start
             && batch_interval.duration.0 % self.min_batch_duration.0 == 0
+    }
+
+    /// Decode the VDAF verification parameter for the provided Role
+    pub fn decode_vdaf_verification_parameter<V>(
+        &self,
+        role: Role,
+        vdaf: &V,
+    ) -> Result<V::VerifyParam, Error>
+    where
+        V: Vdaf,
+        V::VerifyParam: Encode + ParameterizedDecode<V>,
+    {
+        Ok(V::VerifyParam::get_decoded_with_param(
+            vdaf,
+            &self.vdaf_verification_parameter[role.index()],
+        )?)
     }
 }
 
@@ -239,7 +259,14 @@ mod tests {
                 10, 11, 12, 13, 14, 15,
             ],
             vdaf: VdafLabel::Prio3Sum64 { bits: 64 },
-            vdaf_verification_parameter: vec![],
+            vdaf_verification_parameter: vec![
+                vec![
+                    203, 44, 250, 83, 141, 201, 227, 218, 70, 243, 219, 43, 18, 34, 210, 241, 0,
+                ],
+                vec![
+                    203, 44, 250, 83, 141, 201, 227, 218, 70, 243, 219, 43, 18, 34, 210, 241, 1,
+                ],
+            ],
         };
 
         let json_string = r#"
@@ -266,7 +293,10 @@ mod tests {
         }
     },
     "aggregator_auth_key": "AAECAwQFBgcICQoLDA0ODwABAgMEBQYHCAkKCwwNDg8=",
-    "vdaf_verification_parameter": ""
+    "vdaf_verification_parameter": [
+        "yyz6U43J49pG89srEiLS8QA=",
+        "yyz6U43J49pG89srEiLS8QE="
+    ]
 }
 "#;
 

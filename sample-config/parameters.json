@@ -20,5 +20,8 @@
         }
     },
     "aggregator_auth_key": "AAECAwQFBgcICQoLDA0ODwABAgMEBQYHCAkKCwwNDg8=",
-    "vdaf_verification_parameter": ""
+    "vdaf_verification_parameter": [
+        "yyz6U43J49pG89srEiLS8QA=",
+        "yyz6U43J49pG89srEiLS8QE="
+    ]
 }

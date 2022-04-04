@@ -231,6 +231,28 @@ mod base64 {
         Ok(v)
     }
 
+    pub fn serialize_bytes_vec<V: AsRef<[u8]>, S: Serializer>(
+        v: &[V],
+        s: S,
+    ) -> Result<S::Ok, S::Error> {
+        let b64_strings: Vec<String> = v.iter().map(base64::encode).collect();
+
+        <Vec<String>>::serialize(&b64_strings, s)
+    }
+
+    pub fn deserialize_bytes_vec<'de, D: Deserializer<'de>>(
+        d: D,
+    ) -> Result<Vec<Vec<u8>>, D::Error> {
+        let b64_strings = <Vec<String>>::deserialize(d)?;
+
+        let b64_vecs = b64_strings
+            .iter()
+            .map(|s| base64::decode(s).map_err(Error::custom))
+            .collect::<Result<_, _>>()?;
+
+        Ok(b64_vecs)
+    }
+
     pub fn serialize_bytes_option<V: AsRef<[u8]>, S: Serializer>(
         v: &Option<V>,
         s: S,
