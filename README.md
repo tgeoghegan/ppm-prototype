@@ -5,6 +5,11 @@ protocol.
 
 [ppm-doc]: https://github.com/abetterinternet/ppm-specification
 
+# This project is obsolete
+
+`ppm-prototype` implements an obsolete version of the PPM specification. It will
+not receive further updates, nor will bug reports be investigated.
+
 ## Config files
 
 The various binary targets get all their configuration (PPM parameters and HPKE
