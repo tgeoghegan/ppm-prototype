@@ -14,7 +14,7 @@ on:
 jobs:
   touch-gcp:
     runs-on: ubuntu-latest
-    environment: inputs.gh-env
+    environment: ${{ inputs.gh-env }}
     permissions:
       id-token: "write"
       contents: "read"
