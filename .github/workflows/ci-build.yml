@@ -9,6 +9,7 @@ on:
 jobs:
   touch-gcp:
     runs-on: ubuntu-latest
+    environment: fake-prod
     permissions:
       id-token: "write"
       contents: "read"
