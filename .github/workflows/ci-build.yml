@@ -12,6 +12,7 @@ jobs:
     permissions:
       id-token: "write"
       contents: "read"
+    steps:
     # See https://github.com/google-github-actions/auth#authenticating-to-container-registry-and-artifact-registry
     - id: "gcp-auth"
       name: "Authenticate to GCP"
