@@ -1,0 +1,40 @@
+name: ci-build
+
+on:
+  push:
+    branches: [ main, release/** ]
+  pull_request:
+  workflow_dispatch:
+   inputs:
+      gh-env:
+        description: "env"
+        required: true
+        type: string
+
+jobs:
+  touch-gcp:
+    runs-on: ubuntu-latest
+    environment: inputs.gh-env
+    permissions:
+      id-token: "write"
+      contents: "read"
+    steps:
+    # See https://github.com/google-github-actions/auth#authenticating-to-container-registry-and-artifact-registry
+    - id: "gcp-auth"
+      name: "Authenticate to GCP"
+      uses: "google-github-actions/auth@v0"
+      with:
+        workload_identity_provider: ${{ secrets.GCP_ARTIFACT_READER_WORKFLOW_IDENTITY_PROVIDER }}
+        service_account: ${{ secrets.GCP_ARTIFACT_READER_SERVICE_ACCOUNT }}
+        token_format: "access_token"
+        access_token_lifetime: "3600s"
+        access_token_scopes: "https://www.googleapis.com/auth/cloud-platform"
+        export_environment_variables: true
+    - name: "Set up Google Cloud SDK"
+      uses: "google-github-actions/setup-gcloud@v0"
+      with:
+        # We opt into the alpha components so we can use the storage subcommand of gcloud, which
+        # uses Workload Identity Federation more reliably than gsutil.
+        install_components: "alpha"
+    - name: "List bucket contents"
+      run: gcloud alpha storage ls gs://prio-timg-facil-gcp-manifests
